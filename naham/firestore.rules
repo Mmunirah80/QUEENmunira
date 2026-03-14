@@ -1,0 +1,89 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return request.auth != null && request.auth.token.admin == true;
+    }
+
+    // users/{uid}: read/write by owner or admin
+    match /users/{uid} {
+      allow read, write: if isOwner(uid) || isAdmin();
+      // Subcollections: same owner/admin
+      match /addresses/{addressId} {
+        allow read, write: if isOwner(uid) || isAdmin();
+      }
+      match /favorites/{docId} {
+        allow read, write: if isOwner(uid) || isAdmin();
+      }
+      match /notifications/{notificationId} {
+        allow read, write: if isOwner(uid) || isAdmin();
+      }
+    }
+
+    // chefs/{chefId}: read by owner/customers/admin, write by owner or admin
+    match /chefs/{chefId} {
+      allow read: if request.auth != null;
+      allow create: if isOwner(chefId) || isAdmin();
+      allow update, delete: if isOwner(chefId) || isAdmin();
+    }
+
+    // dishes/{dishId}: read by all auth users, write by chef owner
+    match /dishes/{dishId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.chefId == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.chefId == request.auth.uid;
+    }
+
+    // orders/{orderId}: read by customerId/chefId/admin, write customer(create)/chef(update)/admin
+    match /orders/{orderId} {
+      allow read: if request.auth != null && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.chefId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if request.auth != null && request.resource.data.customerId == request.auth.uid;
+      allow update, delete: if request.auth != null && (
+        resource.data.chefId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // chats/{chatId}/messages: read/write by participants only
+    match /chats/{chatId} {
+      allow create: if request.auth != null;
+      allow read, update, delete: if request.auth != null && (
+        request.auth.uid in resource.data.participantIds ||
+        isAdmin()
+      );
+      match /messages/{messageId} {
+        allow read, write: if request.auth != null && (
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantIds ||
+          isAdmin()
+        );
+      }
+    }
+
+    // reels/{reelId}: read by all auth, write by chef owner, update likedBy by any auth user
+    match /reels/{reelId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.chefId == request.auth.uid;
+      allow delete: if request.auth != null && resource.data.chefId == request.auth.uid;
+      allow update: if request.auth != null && (
+        resource.data.chefId == request.auth.uid ||
+        isAdmin() ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likedBy', 'likes']))
+      );
+    }
+
+    // admin_notifications: read/write by admin only
+    match /admin_notifications/{docId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

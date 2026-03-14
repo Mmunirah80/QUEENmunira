@@ -1,0 +1,36 @@
+name: naham_admin_app
+description: NAHAM Admin App - Same theme as TC (Customer & Chef) app
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  flutter_riverpod: ^2.5.1
+  go_router: ^14.0.0
+
+  google_fonts: ^6.1.0
+
+  equatable: ^2.0.5
+  intl: ^0.20.2
+  fl_chart: ^0.66.0
+
+  # Agora for video calls (hygiene inspection)
+  agora_rtc_engine: ^6.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
