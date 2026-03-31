@@ -1,0 +1,12 @@
+-- ============================================================
+-- DEPRECATED — replaced by supabase_apply_chef_document_review.sql
+--
+-- The old function public.dev_simulate_chef_review(text) is DROPPED when you
+-- run supabase_apply_chef_document_review.sql (single pipeline for admin + simulation).
+--
+-- Use instead:
+--   • SQL: run naham/tc/supabase_apply_chef_document_review.sql
+--   • DB flag for cook simulation: UPDATE public.dev_feature_flags SET enabled = true
+--     WHERE key = 'chef_document_review_simulation';
+--   • App: CookDevReview.simulationModeEnabled + simulateApprove / simulateReject
+-- ============================================================

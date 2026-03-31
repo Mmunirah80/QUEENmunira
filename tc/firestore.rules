@@ -1,0 +1,132 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helpers ────────────────────────────────────────────────────────
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return request.auth.uid == uid;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRole(role) {
+      return isAuth() && userDoc().role == role;
+    }
+
+    function isAdmin()    { return hasRole('admin'); }
+    function isChef()     { return hasRole('chef'); }
+    function isCustomer() { return hasRole('customer'); }
+
+    function isApprovedChef() {
+      return isChef() && userDoc().chefApprovalStatus == 'approved';
+    }
+
+    // ─── /users ─────────────────────────────────────────────────────────
+    // • A user can read/update their own document.
+    // • Admins can read and update any user (for chef approval).
+    // • Only Firebase Auth flow (via the app) may create a profile.
+    match /users/{userId} {
+      allow read:   if isAuth() && (isOwner(userId) || isAdmin());
+      allow create: if isAuth() && isOwner(userId);
+      allow update: if isAuth() && (isOwner(userId) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // ─── /dishes ────────────────────────────────────────────────────────
+    // • Any authenticated user can read dishes.
+    // • Only approved chefs can create dishes, and only under their own chefId.
+    // • Only the owning chef (or admin) can update/delete.
+    match /dishes/{dishId} {
+      allow read: if isAuth();
+
+      allow create: if isApprovedChef()
+                    && request.resource.data.chefId == request.auth.uid;
+
+      allow update: if isApprovedChef()
+                    && resource.data.chefId == request.auth.uid;
+
+      allow delete: if isAdmin()
+                    || (isApprovedChef()
+                        && resource.data.chefId == request.auth.uid);
+    }
+
+    // ─── /orders ────────────────────────────────────────────────────────
+    // • Customers read their own orders; chefs read orders assigned to them.
+    // • Only customers can create orders (customerId must equal their uid).
+    // • Chefs can update order status; customers can only cancel.
+    // • Only admins can delete orders.
+    match /orders/{orderId} {
+      allow read: if isAuth()
+                  && (resource.data.customerId == request.auth.uid
+                      || resource.data.chefId   == request.auth.uid
+                      || isAdmin());
+
+      allow create: if isCustomer()
+                    && request.resource.data.customerId == request.auth.uid;
+
+      allow update: if isAuth()
+                    && (
+                      // Chef updates status
+                      resource.data.chefId == request.auth.uid
+                      // Customer may only cancel
+                      || (resource.data.customerId == request.auth.uid
+                          && request.resource.data.status == 'cancelled')
+                      || isAdmin()
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+    // ─── /chefs ─────────────────────────────────────────────────────────
+    // • Chef can create/read/update own doc; customers can read (discovery); admin full.
+    match /chefs/{chefId} {
+      allow read: if isAuth();
+      allow create: if isAuth() && request.auth.uid == chefId;
+      allow update: if isAuth() && (request.auth.uid == chefId || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // ─── /chats/{chatId}/messages ────────────────────────────────────────
+    // • Read/write by participants only (simplified: any auth for now; tighten with participant list if needed).
+    match /chats/{chatId} {
+      allow read, write: if isAuth();
+      match /messages/{messageId} {
+        allow read, write: if isAuth();
+      }
+    }
+
+    // ─── /reels ─────────────────────────────────────────────────────────
+    // • Read by all authenticated; create/delete by chef owner; update likedBy/likes by any auth.
+    match /reels/{reelId} {
+      allow read: if isAuth();
+      allow create: if isAuth() && request.resource.data.chefId == request.auth.uid;
+      allow delete: if isAuth() && resource.data.chefId == request.auth.uid;
+      allow update: if isAuth() && (
+        resource.data.chefId == request.auth.uid
+        || isAdmin()
+        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likedBy', 'likes'])
+      );
+    }
+
+    // ─── /notifications ─────────────────────────────────────────────────
+    // • Read/write by owner (userId).
+    match /notifications/{notificationId} {
+      allow read, write: if isAuth() && resource.data.userId == request.auth.uid;
+      allow create: if isAuth() && request.resource.data.userId == request.auth.uid;
+    }
+
+    // ─── /admin_notifications ───────────────────────────────────────────
+    // • Read/write by admin only.
+    match /admin_notifications/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+  }
+}

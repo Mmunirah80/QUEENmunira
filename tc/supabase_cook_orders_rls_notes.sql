@@ -1,0 +1,11 @@
+-- If "Start preparing" / direct UPDATE on orders still fails with RLS or 403:
+-- 1) In Supabase → Authentication → Policies on `orders`, ensure the cook role can UPDATE rows
+--    where `chef_id = auth.uid()` for statuses you allow (pending → accepted → preparing → ready …).
+-- 2) Ensure enum `order_status` includes: preparing, accepted, ready, completed, cancelled_by_cook, pending, …
+-- 3) Run `supabase_is_valid_order_transition.sql` if RPC `transition_order_status` references it.
+
+-- Example policy sketch (adjust to your schema and role names):
+-- CREATE POLICY "cooks_update_own_orders"
+--   ON public.orders FOR UPDATE
+--   USING (chef_id = auth.uid())
+--   WITH CHECK (chef_id = auth.uid());

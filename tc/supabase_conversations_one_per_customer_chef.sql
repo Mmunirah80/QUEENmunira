@@ -1,0 +1,25 @@
+-- Aligns the DB with the app: **one customer–chef thread per pair** (all orders share the same chat).
+-- Prevent duplicate customer–chef conversation rows (fixes PostgREST 406 on .single() / .maybeSingle()).
+-- 1) Delete duplicates, keeping the newest row per (customer_id, chef_id) for type = 'customer-chef'.
+-- 2) Add a partial unique index.
+--
+-- Run step 1 in SQL Editor, verify counts, then run step 2.
+
+-- Step 1: remove older duplicates (PostgreSQL)
+-- WITH ranked AS (
+--   SELECT id,
+--          ROW_NUMBER() OVER (
+--            PARTITION BY customer_id, chef_id
+--            ORDER BY created_at DESC NULLS LAST
+--          ) AS rn
+--   FROM conversations
+--   WHERE type = 'customer-chef' AND chef_id IS NOT NULL
+-- )
+-- DELETE FROM conversations c
+-- USING ranked r
+-- WHERE c.id = r.id AND r.rn > 1;
+
+-- Step 2: after no duplicates remain:
+-- CREATE UNIQUE INDEX IF NOT EXISTS conversations_customer_chef_unique
+-- ON public.conversations (customer_id, chef_id)
+-- WHERE type = 'customer-chef' AND chef_id IS NOT NULL;
