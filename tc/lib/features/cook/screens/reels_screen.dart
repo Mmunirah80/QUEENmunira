@@ -1,5 +1,5 @@
 // ============================================================
-// COOK REELS — Discover (all) + My reels; upload; delete own only.
+// COOK REELS — Discover + My reels (both list this kitchen only); upload; delete own only.
 // ============================================================
 
 import 'dart:io';
@@ -341,7 +341,6 @@ class _ReelsScreenState extends ConsumerState<ReelsScreen>
                                               dishId: dishSelection[0],
                                             );
                                       }
-                                      ref.invalidate(reelsStreamProvider);
                                       final uid = ref.read(authStateProvider).valueOrNull?.id;
                                       if (uid != null && uid.isNotEmpty) {
                                         ref.invalidate(myReelsStreamProvider(uid));
@@ -388,15 +387,19 @@ class _ReelsDiscoverTab extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final reelsAsync = ref.watch(reelsStreamProvider);
+    final reelsAsync = userId.isEmpty
+        ? const AsyncValue<List<ReelEntity>>.data(<ReelEntity>[])
+        : ref.watch(myReelsStreamProvider(userId));
     return _ReelsVerticalFeed(
       reelsAsync: reelsAsync,
       userId: userId,
       emptyTitle: 'No reels yet',
-      emptySubtitle: 'When cooks publish reels, they appear here.',
-      onEmptyPressed: () => ref.invalidate(reelsStreamProvider),
+      emptySubtitle: 'Upload a short video in My reels to showcase your kitchen.',
+      onEmptyPressed: () {
+        if (userId.isNotEmpty) ref.invalidate(myReelsStreamProvider(userId));
+      },
       onRefresh: () async {
-        ref.invalidate(reelsStreamProvider);
+        if (userId.isNotEmpty) ref.invalidate(myReelsStreamProvider(userId));
       },
     );
   }
@@ -431,7 +434,6 @@ class _ReelsMyTab extends ConsumerWidget {
       onEmptyPressed: onUpload,
       onRefresh: () async {
         ref.invalidate(myReelsStreamProvider(userId));
-        ref.invalidate(reelsStreamProvider);
       },
       onDeleteReel: (reel) => _confirmDeleteReel(context, ref, reel, userId),
     );
@@ -467,7 +469,6 @@ class _ReelsMyTab extends ConsumerWidget {
       if (myChefId.isNotEmpty) {
         ref.invalidate(myReelsStreamProvider(myChefId));
       }
-      ref.invalidate(reelsStreamProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reel deleted')));
       }
@@ -550,6 +551,7 @@ class _ReelsVerticalFeedState extends ConsumerState<_ReelsVerticalFeed> {
               final reel = reels[index];
               final isOwner = reel.chefId == widget.userId;
               return ReelVideoPage(
+                key: ValueKey(reel.id),
                 reel: reel,
                 isActive: index == _currentPage,
                 onDelete: isOwner && widget.onDeleteReel != null

@@ -100,8 +100,9 @@ class ChefFirebaseDataSource {
   Future<void> toggleVacation(String chefId, bool vacationMode) async {
     if (chefId.isEmpty) return;
     print('[ChefFirebaseDataSource] toggleVacation chefId=$chefId vacationMode=$vacationMode');
-    await _sb.from('chef_profiles')
-        .update({'vacation_mode': vacationMode}).eq('id', chefId);
+    final patch = <String, dynamic>{'vacation_mode': vacationMode};
+    if (vacationMode) patch['is_online'] = false;
+    await _sb.from('chef_profiles').update(patch).eq('id', chefId);
   }
 
   /// Replace full working_hours jsonb.

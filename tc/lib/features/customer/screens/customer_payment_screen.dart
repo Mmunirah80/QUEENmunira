@@ -1,5 +1,5 @@
 // ============================================================
-// PAYMENT — Order summary from cart, address, Place Order → create order in Supabase → Waiting screen.
+// PAYMENT — Order summary from cart, pickup point, Place Order → create order in Supabase → Waiting screen.
 // ============================================================
 
 import 'package:flutter/foundation.dart';
@@ -12,7 +12,9 @@ import 'package:uuid/uuid.dart';
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
 import 'package:naham_cook_app/features/orders/presentation/orders_failure.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
+import 'package:naham_cook_app/features/auth/domain/entities/user_entity.dart';
 import 'package:naham_cook_app/features/auth/presentation/providers/auth_provider.dart';
+import 'package:naham_cook_app/features/customer/constants/customer_checkout_constants.dart';
 import 'package:naham_cook_app/features/customer/data/models/cart_item_model.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_main_navigation_screen.dart';
@@ -27,7 +29,17 @@ class _C {
   static const textSub = AppDesignSystem.textSecondary;
 }
 
-const double _commissionRate = 0.10;
+String _customerCheckoutDisplayName(UserEntity? user) {
+  if (user == null) return 'Customer';
+  final name = user.name.trim();
+  if (name.isNotEmpty) return name;
+  final email = user.email.trim();
+  if (email.isNotEmpty) {
+    final local = email.split('@').first.trim();
+    if (local.isNotEmpty) return local;
+  }
+  return 'Customer';
+}
 
 class CustomerPaymentScreen extends ConsumerStatefulWidget {
   const CustomerPaymentScreen({super.key});
@@ -46,12 +58,11 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
   Widget build(BuildContext context) {
     final cart = ref.watch(cartProvider);
     final subtotal = ref.watch(cartSubtotalProvider);
-    final commission = subtotal * _commissionRate;
+    final commission = subtotal * kCustomerCheckoutCommissionRate;
     final total = subtotal + commission;
-    final addresses = ref.watch(customerAddressesStreamProvider).valueOrNull ?? [];
     final pickup = ref.watch(customerPickupOriginProvider);
     final user = ref.watch(authStateProvider).valueOrNull;
-    final customerName = user?.name ?? user?.email ?? 'Test Customer';
+    final customerName = _customerCheckoutDisplayName(user);
 
     if (cart.isEmpty) {
       return Scaffold(
@@ -74,12 +85,8 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
       );
     }
 
-    final savedProfileAddress = _formatAddress(addresses.isNotEmpty ? addresses.first : null);
-    final meetupForOrder = _meetupStringForOrder(pickup: pickup, savedProfileAddress: savedProfileAddress);
-    final meetupDisplay = _meetupDisplayLines(
-      pickup: pickup,
-      savedProfileAddress: savedProfileAddress,
-    );
+    final meetupForOrder = _meetupStringForOrder(pickup: pickup);
+    final meetupDisplay = _meetupDisplayLines(pickup: pickup);
 
     return Scaffold(
       backgroundColor: _C.bg,
@@ -114,9 +121,7 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
                   Text(
                     pickup != null
                         ? 'From Home: GPS or map pin you set (stored on this device). Exact spot with the cook can be shared in chat.'
-                        : (savedProfileAddress.isNotEmpty
-                            ? 'No pickup pin on Home — using saved profile address if you place order.'
-                            : 'Set pickup on Home (recommended), or add an address in Profile.'),
+                        : 'Set your pickup point on Home (GPS or map) before placing an order.',
                     style: const TextStyle(fontSize: 12, color: _C.textSub, height: 1.35),
                   ),
                   const SizedBox(height: 8),
@@ -153,20 +158,8 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
     );
   }
 
-  String _formatAddress(Map<String, dynamic>? a) {
-    if (a == null) return '';
-    final street = a['street'] as String? ?? '';
-    final city = a['city'] as String? ?? '';
-    final label = a['label'] as String? ?? '';
-    final parts = [if (label.isNotEmpty) label, street, if (city.isNotEmpty) city];
-    return parts.join(', ');
-  }
-
-  /// Single string stored on the order (pickup-first; cook can open coords in Maps).
-  static String _meetupStringForOrder({
-    required CustomerPickupOrigin? pickup,
-    required String savedProfileAddress,
-  }) {
+  /// Single string stored on the order (pickup pin; cook can open coords in Maps).
+  static String _meetupStringForOrder({required CustomerPickupOrigin? pickup}) {
     if (pickup != null) {
       final lat = pickup.latitude.toStringAsFixed(5);
       final lng = pickup.longitude.toStringAsFixed(5);
@@ -174,13 +167,10 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
       final areaBit = area.isNotEmpty ? ' · $area' : '';
       return 'Pickup: ${pickup.label}$areaBit ($lat, $lng)';
     }
-    return savedProfileAddress.trim();
+    return '';
   }
 
-  static String _meetupDisplayLines({
-    required CustomerPickupOrigin? pickup,
-    required String savedProfileAddress,
-  }) {
+  static String _meetupDisplayLines({required CustomerPickupOrigin? pickup}) {
     if (pickup != null) {
       final lat = pickup.latitude.toStringAsFixed(5);
       final lng = pickup.longitude.toStringAsFixed(5);
@@ -189,15 +179,9 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
         buf.write('\n${pickup.label}');
       }
       buf.write('\n$lat, $lng');
-      if (savedProfileAddress.isNotEmpty) {
-        buf.write('\n\nOptional profile address:\n$savedProfileAddress');
-      }
       return buf.toString();
     }
-    if (savedProfileAddress.isNotEmpty) {
-      return savedProfileAddress;
-    }
-    return 'Not set — open Home and use “Use my current location” or “Pick on map”,\nor add an address under Profile → Addresses.';
+    return 'Not set — open Home and use “Use my current location” or “Pick on map”.';
   }
 
   Future<void> _payNow(
@@ -229,8 +213,21 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
     if (meetupForOrder.trim().isEmpty) {
       SnackbarHelper.error(
         context,
-        'Set a pickup point on Home (GPS or map), or add an address in Profile → Addresses.',
+        'Set a pickup point on Home (GPS or map).',
       );
+      return;
+    }
+
+    if (cart.isEmpty) {
+      SnackbarHelper.error(context, 'Your cart is empty.');
+      return;
+    }
+
+    final browse = ref.read(customerBrowseDataSourceProvider);
+    final block = await browse.validateCheckoutCart(cart);
+    if (!context.mounted) return;
+    if (block != null) {
+      SnackbarHelper.error(context, block);
       return;
     }
 
@@ -272,7 +269,7 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
           );
         }
         final groupSubtotal = items.fold<double>(0, (s, e) => s + e.lineTotal);
-        final groupCommission = groupSubtotal * _commissionRate;
+        final groupCommission = groupSubtotal * kCustomerCheckoutCommissionRate;
         final groupTotal = groupSubtotal + groupCommission;
         if (kDebugMode) {
           debugPrint(
@@ -332,6 +329,17 @@ class _CustomerPaymentScreenState extends ConsumerState<CustomerPaymentScreen> {
         }
       }
     } catch (e, st) {
+      // Multi-chef checkout: cancel any orders already created for this attempt (all-or-nothing UX).
+      if (orderIds.isNotEmpty) {
+        final rollbackDs = ref.read(customerOrdersSupabaseDatasourceProvider);
+        for (final oid in orderIds) {
+          try {
+            await rollbackDs.cancelPendingOrderAfterPaymentFailure(oid);
+          } catch (e2) {
+            debugPrint('[Payment] rollback cancel failed for $oid: $e2');
+          }
+        }
+      }
       // Keep idempotency keys for active groups so a retry can reuse them.
       _pendingIdempotencyKeysByGroup.removeWhere(
         (signature, _) => !activeGroupSignatures.contains(signature),

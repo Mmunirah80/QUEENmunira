@@ -1,5 +1,6 @@
 // ============================================================
-// Customer main navigation — 5 tabs: Home, Reels, Orders, Chat, Profile
+// Customer main navigation — 5 tabs (IndexedStack order):
+// Home, Reels, Chat, Orders, Profile
 // Home reads from Supabase (menu_items, chef_profiles) via providers.
 // ============================================================
 
@@ -8,7 +9,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
 import 'package:naham_cook_app/core/theme/naham_theme.dart';
-import 'package:naham_cook_app/features/customer/data/customer_pickup_storage.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_home_screen.dart' show NahamCustomerHomeScreen;
 import 'package:naham_cook_app/features/customer/screens/customer_chat_screen.dart';
@@ -38,24 +38,8 @@ class _CustomerMainNavigationScreenState extends ConsumerState<CustomerMainNavig
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex.clamp(0, 4);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreSavedPickupPoint());
-  }
-
-  Future<void> _restoreSavedPickupPoint() async {
-    if (!mounted) return;
-    if (ref.read(customerPickupOriginProvider) != null) return;
-    final saved = await CustomerPickupStorage.load();
-    if (!mounted || saved == null) return;
-    ref.read(customerPickupOriginProvider.notifier).state = saved;
-    ref.read(customerLocationProvider.notifier).state = CustomerLocationData(
-      region: '',
-      city: saved.headerLine,
-      district: '',
-    );
-    ref.read(customerCitySelectionProvider.notifier).state = {
-      'city': saved.headerLine,
-      'district': '',
-    };
+    // Pickup is not restored from disk here — [customerPickupOriginProvider] starts null until the
+    // customer confirms GPS/map on Home (see CustomerPickupStorage.save on confirm only).
   }
 
   @override

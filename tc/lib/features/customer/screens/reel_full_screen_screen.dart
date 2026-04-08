@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
+import 'package:naham_cook_app/features/auth/presentation/providers/auth_provider.dart';
 import 'package:naham_cook_app/features/reels/domain/entities/reel_entity.dart';
 import 'package:naham_cook_app/features/reels/presentation/providers/reels_provider.dart';
 import 'chef_profile_screen.dart';
@@ -24,6 +25,7 @@ class _ReelFullScreenScreenState extends ConsumerState<ReelFullScreenScreen> {
   late VideoPlayerController _controller;
   bool _liked = false;
   int _likesCount = 0;
+  bool _likeBusy = false;
 
   @override
   void initState() {
@@ -47,13 +49,44 @@ class _ReelFullScreenScreenState extends ConsumerState<ReelFullScreenScreen> {
   }
 
   Future<void> _toggleLike() async {
+    final uid = ref.read(authStateProvider).valueOrNull?.id ?? '';
+    if (uid.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sign in to like reels')),
+      );
+      return;
+    }
+    if (_likeBusy) return;
     final repo = ref.read(reelsRepositoryProvider);
-    if (_liked) {
-      await repo.unlikeReel(widget.reel.id);
-      if (mounted) setState(() { _liked = false; _likesCount = (_likesCount - 1).clamp(0, 1 << 30); });
-    } else {
-      await repo.likeReel(widget.reel.id);
-      if (mounted) setState(() { _liked = true; _likesCount++; });
+    setState(() => _likeBusy = true);
+    try {
+      if (_liked) {
+        await repo.unlikeReel(widget.reel.id);
+        if (mounted) {
+          setState(() {
+            _liked = false;
+            _likesCount = (_likesCount - 1).clamp(0, 1 << 30);
+          });
+        }
+      } else {
+        await repo.likeReel(widget.reel.id);
+        if (mounted) {
+          setState(() {
+            _liked = true;
+            _likesCount++;
+          });
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _liked = widget.reel.isLiked;
+          _likesCount = widget.reel.likesCount;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _likeBusy = false);
     }
   }
 

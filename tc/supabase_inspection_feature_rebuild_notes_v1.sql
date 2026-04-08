@@ -1,0 +1,33 @@
+-- =============================================================================
+-- NAHAM — Random live inspection feature (Flutter rebuild) — SCHEMA NOTES
+-- =============================================================================
+-- Date: 2026-04-01
+--
+-- This file documents whether NEW database changes are required for the
+-- rebuilt inspection UI + Agora logic. It does NOT alter production data.
+--
+-- CONCLUSION: No new tables or columns are required for this app release IF
+-- the project already has applied (in order, as applicable):
+--   - supabase_inspection_calls_v1.sql
+--   - supabase_inspection_random_v2.sql
+--   - supabase_inspection_fair_selection_v1.sql (optional but recommended)
+--   - supabase_inspection_calls_enforce_rpc_outcomes.sql
+--   - supabase_inspection_drop_legacy_finalize_v1.sql (drops legacy finalize)
+--
+-- Existing behavior (unchanged):
+--   - inspection_calls.status: pending → accepted | declined | missed → completed | cancelled
+--   - chef_respond_inspection_call(p_call_id, p_response) with accepted | declined | missed
+--   - finalize_inspection_outcome(p_call_id, p_outcome, p_note) — admin outcome only; penalties automatic
+--   - chef_violations rows inserted on countable violations
+--   - selection_context jsonb on inspection_calls (fair selection migration)
+--
+-- If any of the above migrations are missing, apply them from this repo; do
+-- not invent parallel schemas.
+--
+-- MOCK / DEMO SEED:
+--   Use supabase_presentation_demo_seed.sql only in non-production environments.
+--   No change required for this rebuild unless you add new inspection demo rows;
+--   if you do, document the INSERT in that seed file explicitly.
+-- =============================================================================
+
+SELECT 1 AS inspection_rebuild_schema_ok;

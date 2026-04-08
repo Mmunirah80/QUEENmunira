@@ -10,10 +10,14 @@ class OrderModel extends OrderEntity {
     super.chefName,
     required super.items,
     required super.totalAmount,
+    super.commissionAmount,
     required super.status,
+    super.dbStatus,
+    super.cancelReason,
     required super.createdAt,
     super.deliveryAddress,
     super.notes,
+    super.idempotencyKey,
   });
 
   factory OrderModel.fromJson(Map<String, dynamic> json) {
@@ -28,13 +32,17 @@ class OrderModel extends OrderEntity {
           .map((item) => OrderItemModel.fromJson(item as Map<String, dynamic>))
           .toList(),
       totalAmount: (json['totalAmount'] as num).toDouble(),
+      commissionAmount: (json['commissionAmount'] as num?)?.toDouble(),
       status: OrderStatus.values.firstWhere(
         (e) => e.toString() == 'OrderStatus.${json['status']}',
         orElse: () => OrderStatus.pending,
       ),
+      dbStatus: json['dbStatus'] as String?,
+      cancelReason: json['cancelReason'] as String?,
       createdAt: DateTime.parse(json['createdAt'] as String),
       deliveryAddress: json['deliveryAddress'] as String?,
       notes: json['notes'] as String?,
+      idempotencyKey: json['idempotencyKey'] as String?,
     );
   }
 
@@ -48,10 +56,14 @@ class OrderModel extends OrderEntity {
       'chefName': chefName,
       'items': items.map((item) => (item as OrderItemModel).toJson()).toList(),
       'totalAmount': totalAmount,
+      if (commissionAmount != null) 'commissionAmount': commissionAmount,
       'status': status.toString().split('.').last,
+      if (dbStatus != null) 'dbStatus': dbStatus,
+      if (cancelReason != null) 'cancelReason': cancelReason,
       'createdAt': createdAt.toIso8601String(),
       'deliveryAddress': deliveryAddress,
       'notes': notes,
+      if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
     };
   }
 }

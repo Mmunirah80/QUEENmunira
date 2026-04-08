@@ -1,18 +1,22 @@
 // ============================================================
-// WAITING FOR CHEF — 5-min timer, realtime order status (customer cancel disabled).
+// WAITING FOR CHEF — Countdown from [orders.created_at] + 5 min (same as backend).
+// Realtime order stream; expiry also enforced server-side (see supabase_orders_pending_timeout_v1.sql).
 // ============================================================
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:naham_cook_app/core/orders/order_pending_timeout.dart';
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_order_details_screen.dart';
+import 'package:naham_cook_app/features/orders/data/models/order_model.dart';
+import 'package:naham_cook_app/features/orders/data/order_db_status.dart';
 import 'package:naham_cook_app/features/orders/domain/entities/order_entity.dart';
+import 'package:naham_cook_app/features/orders/presentation/mappers/order_ui_mapper.dart';
 import 'package:naham_cook_app/features/orders/presentation/orders_failure.dart';
 import 'package:naham_cook_app/features/orders/presentation/widgets/orders_stream_error_panel.dart';
 
@@ -21,8 +25,6 @@ class _C {
   static const bg = AppDesignSystem.backgroundOffWhite;
   static const text = AppDesignSystem.textPrimary;
 }
-
-const _waitSeconds = 5 * 60; // 5 minutes
 
 class CustomerWaitingForChefScreen extends ConsumerStatefulWidget {
   final String orderId;
@@ -33,54 +35,85 @@ class CustomerWaitingForChefScreen extends ConsumerStatefulWidget {
   ConsumerState<CustomerWaitingForChefScreen> createState() => _CustomerWaitingForChefScreenState();
 }
 
-class _CustomerWaitingForChefScreenState extends ConsumerState<CustomerWaitingForChefScreen> {
-  int _remainingSeconds = _waitSeconds;
+class _CustomerWaitingForChefScreenState extends ConsumerState<CustomerWaitingForChefScreen>
+    with WidgetsBindingObserver {
   Timer? _timer;
-  bool _timedOut = false;
+  int _remainingSeconds = 0;
+  bool _expireCallInFlight = false;
+  String? _timerSignature;
 
   @override
   void initState() {
     super.initState();
-    _startTimer();
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     super.dispose();
   }
 
-  void _startTimer() {
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) async {
-      if (!mounted) return;
-
-      if (_remainingSeconds <= 0) {
-        _timer?.cancel();
-        await _onExpired();
-        return;
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      final order = ref.read(customerOrderByIdStreamProvider(widget.orderId)).valueOrNull;
+      if (order != null && order.status == OrderStatus.pending) {
+        _ensureTimerForOrder(order);
       }
-
-      setState(() => _remainingSeconds--);
-    });
+    }
   }
 
-  Future<void> _onExpired() async {
-    if (_timedOut) return;
-    setState(() => _timedOut = true);
+  void _ensureTimerForOrder(OrderModel order) {
+    final sig = '${order.id}:${order.createdAt.toUtc().toIso8601String()}';
+    if (_timerSignature == sig && _timer != null) return;
+    _timerSignature = sig;
+    _timer?.cancel();
+    void tick() {
+      if (!mounted) return;
+      final now = DateTime.now().toUtc();
+      final rem = remainingAcceptanceSeconds(order.createdAt, now);
+      setState(() => _remainingSeconds = rem);
+      if (rem <= 0) {
+        _timer?.cancel();
+        unawaited(_onDeadlineReached());
+      }
+    }
+
+    tick();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => tick());
+  }
+
+  Future<void> _onDeadlineReached() async {
+    if (_expireCallInFlight) return;
+    final latest = ref.read(customerOrderByIdStreamProvider(widget.orderId)).valueOrNull;
+    if (latest == null || latest.status != OrderStatus.pending) return;
+
+    _expireCallInFlight = true;
+    var success = false;
     try {
       await ref.read(customerOrdersSupabaseDatasourceProvider).expireOrderByTimeout(widget.orderId);
-    } catch (e) {
-      debugPrint('[WaitingForChef] Expire order error: $e');
+      success = true;
+    } catch (e, st) {
+      debugPrint('[WaitingForChef] Expire order error: $e\n$st');
       if (mounted) {
-        SnackbarHelper.error(context, resolveOrdersUiError(e));
+        final msg = e.toString().toLowerCase();
+        if (!msg.contains('not allowed') && !msg.contains('updated by another')) {
+          SnackbarHelper.error(context, resolveOrdersUiError(e));
+        }
       }
-      return;
+    } finally {
+      _expireCallInFlight = false;
     }
+
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Order expired')),
-    );
-    Navigator.of(context).popUntil((route) => route.isFirst);
+    ref.invalidate(customerOrderByIdStreamProvider(widget.orderId));
+    if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cancelled by system')),
+      );
+    }
   }
 
   @override
@@ -89,14 +122,32 @@ class _CustomerWaitingForChefScreenState extends ConsumerState<CustomerWaitingFo
 
     return orderAsync.when(
       data: (order) {
-        if (order != null && order.status == OrderStatus.cancelled) {
+        if (order == null) {
+          return Scaffold(
+            backgroundColor: _C.bg,
+            appBar: AppBar(
+              backgroundColor: _C.primary,
+              foregroundColor: Colors.white,
+              title: const Text('Waiting for Cook'),
+            ),
+            body: const Center(child: CircularProgressIndicator(color: _C.primary)),
+          );
+        }
+
+        if (order.status == OrderStatus.cancelled) {
           _timer?.cancel();
           final notes = (order.notes ?? '').toLowerCase();
-          final isSoldOut =
-              notes.contains('sold out') || notes.contains('sold-out') || notes.contains('unavailable') || notes.contains('no longer');
+          final isSoldOut = notes.contains('sold out') ||
+              notes.contains('sold-out') ||
+              notes.contains('unavailable') ||
+              notes.contains('no longer');
           final message = isSoldOut
               ? 'Sorry, this dish is no longer available'
-              : 'Order cancelled';
+              : OrderDbStatus.customerCancellationSummary(
+                  order.dbStatus,
+                  cancelReason: order.cancelReason,
+                  orderStatusFallback: order.status,
+                );
 
           return Scaffold(
             backgroundColor: _C.bg,
@@ -135,7 +186,7 @@ class _CustomerWaitingForChefScreenState extends ConsumerState<CustomerWaitingFo
           );
         }
 
-        if (order != null && order.status == OrderStatus.accepted) {
+        if (order.status == OrderStatus.accepted) {
           _timer?.cancel();
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
@@ -160,7 +211,14 @@ class _CustomerWaitingForChefScreenState extends ConsumerState<CustomerWaitingFo
           );
         }
 
-        return _buildWaitingBody();
+        if (order.status == OrderStatus.pending) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _ensureTimerForOrder(order);
+          });
+        }
+
+        return _buildWaitingBody(order);
       },
       loading: () => Scaffold(
         backgroundColor: _C.bg,
@@ -188,7 +246,7 @@ class _CustomerWaitingForChefScreenState extends ConsumerState<CustomerWaitingFo
     );
   }
 
-  Widget _buildWaitingBody() {
+  Widget _buildWaitingBody(OrderModel order) {
     final min = _remainingSeconds ~/ 60;
     final sec = _remainingSeconds % 60;
 
@@ -212,11 +270,31 @@ class _CustomerWaitingForChefScreenState extends ConsumerState<CustomerWaitingFo
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: _C.text),
               ),
+              if (widget.orderId.trim().isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Order #${OrderUiMapper.shortOrderId(widget.orderId)}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: _C.primary),
+                ),
+                const SizedBox(height: 6),
+                SelectableText(
+                  widget.orderId,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 11, color: _C.text.withValues(alpha: 0.75), height: 1.3),
+                ),
+              ],
               const SizedBox(height: 12),
               Text(
                 "Pickup only. After acceptance you'll see the order timeline and can chat with the cook (e.g. share a Google Maps pin).",
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 13, color: _C.text.withValues(alpha: 0.75), height: 1.35),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Chef has ${kChefAcceptanceTimeout.inMinutes} minutes to respond',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: _C.text.withValues(alpha: 0.65), fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 24),
               Container(

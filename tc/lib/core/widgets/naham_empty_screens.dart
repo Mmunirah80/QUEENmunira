@@ -168,12 +168,50 @@ class EmptyChatContent extends StatelessWidget {
     super.key,
     this.title = 'No conversations yet',
     this.subtitle = 'When customers message you, they\'ll appear here.',
-    this.actionLabel = 'Go to Home',
+    this.actionLabel = 'OK',
     this.onAction,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (onAction == null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Image.asset(
+              NahamTheme.logoAsset,
+              width: 100,
+              height: 100,
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => Icon(
+                Icons.chat_bubble_outline_rounded,
+                size: 80,
+                color: NahamTheme.primary,
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              title,
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: NahamTheme.textOnLight,
+                  ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              subtitle,
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: NahamTheme.textSecondary,
+                  ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
     return NahamEmptyStateContent(
       title: title,
       subtitle: subtitle,
@@ -216,12 +254,14 @@ class ErrorStateContent extends StatelessWidget {
   final String message;
   final VoidCallback? onRetry;
   final IconData? fallbackIcon;
+  final String actionLabel;
 
   const ErrorStateContent({
     super.key,
     this.message = 'Something went wrong. Please try again.',
     this.onRetry,
     this.fallbackIcon,
+    this.actionLabel = 'Try again',
   });
 
   @override
@@ -229,7 +269,7 @@ class ErrorStateContent extends StatelessWidget {
     return NahamEmptyStateContent(
       title: 'Oops',
       subtitle: message,
-      buttonLabel: 'Retry',
+      buttonLabel: actionLabel,
       onPressed: onRetry,
       fallbackIcon: fallbackIcon ?? Icons.error_outline_rounded,
     );

@@ -7,13 +7,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
+import 'package:naham_cook_app/features/orders/data/order_db_status.dart';
 import 'package:naham_cook_app/features/orders/presentation/mappers/order_ui_mapper.dart';
 import 'package:naham_cook_app/features/orders/presentation/orders_failure.dart';
 import 'package:naham_cook_app/features/orders/presentation/widgets/orders_stream_error_panel.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
 import 'package:naham_cook_app/features/orders/domain/entities/order_entity.dart';
 import 'package:naham_cook_app/features/orders/data/models/order_model.dart';
-import 'package:naham_cook_app/features/customer/data/datasources/customer_orders_supabase_datasource.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_chat_screen.dart';
 
@@ -34,46 +34,9 @@ class CustomerOrderDetailsScreen extends ConsumerStatefulWidget {
 }
 
 class _CustomerOrderDetailsScreenState extends ConsumerState<CustomerOrderDetailsScreen> {
-  bool _cancelling = false;
-
   Future<void> _onRefresh() async {
     ref.invalidate(customerOrderByIdStreamProvider(widget.orderId));
     await ref.read(customerOrderByIdStreamProvider(widget.orderId).future);
-  }
-
-  Future<void> _confirmAndCancelOrder(String orderId) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Cancel this order?'),
-        content: const Text(
-          'You can cancel while the cook has not accepted yet. Items return to availability.',
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep order')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Cancel order'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    setState(() => _cancelling = true);
-    try {
-      await CustomerOrdersSupabaseDatasource().cancelOrderByCustomer(orderId);
-      ref.invalidate(customerOrderByIdStreamProvider(orderId));
-      ref.invalidate(customerOrdersStreamProvider);
-      if (mounted) {
-        SnackbarHelper.success(context, 'Order cancelled');
-      }
-    } catch (e) {
-      if (mounted) {
-        SnackbarHelper.error(context, resolveOrdersUiError(e));
-      }
-    } finally {
-      if (mounted) setState(() => _cancelling = false);
-    }
   }
 
   @override
@@ -129,11 +92,7 @@ class _CustomerOrderDetailsScreenState extends ConsumerState<CustomerOrderDetail
           return RefreshIndicator(
             color: _C.primary,
             onRefresh: _onRefresh,
-            child: _OrderContent(
-              order: order,
-              isCancelling: _cancelling,
-              onCancelPressed: () => _confirmAndCancelOrder(order.id),
-            ),
+            child: _OrderContent(order: order),
           );
         },
         loading: () => const Center(child: CircularProgressIndicator(color: _C.primary)),
@@ -150,14 +109,8 @@ class _CustomerOrderDetailsScreenState extends ConsumerState<CustomerOrderDetail
 
 class _OrderContent extends ConsumerWidget {
   final OrderModel order;
-  final bool isCancelling;
-  final VoidCallback onCancelPressed;
 
-  const _OrderContent({
-    required this.order,
-    required this.isCancelling,
-    required this.onCancelPressed,
-  });
+  const _OrderContent({required this.order});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -185,15 +138,22 @@ class _OrderContent extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
-                      children: const [
-                        Icon(Icons.cancel, color: Colors.red),
-                        SizedBox(width: 8),
-                        Text(
-                          'Order Cancelled',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.red,
+                      children: [
+                        const Icon(Icons.cancel, color: Colors.red),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            OrderDbStatus.customerFacingLabel(
+                              order.dbStatus,
+                              cancelReason: order.cancelReason,
+                              detail: true,
+                              orderStatusFallback: order.status,
+                            ),
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.red,
+                            ),
                           ),
                         ),
                       ],
@@ -217,32 +177,17 @@ class _OrderContent extends ConsumerWidget {
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
                 child: Text(
-                  'Waiting for cook to accept...',
+                  'Waiting for cook to accept…',
                   style: TextStyle(fontSize: 14, color: _C.textSub),
                   textAlign: TextAlign.center,
-                ),
-              ),
-              OutlinedButton.icon(
-                onPressed: isCancelling ? null : onCancelPressed,
-                icon: isCancelling
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: AppDesignSystem.errorRed),
-                      )
-                    : const Icon(Icons.cancel_outlined),
-                label: Text(isCancelling ? 'Cancelling…' : 'Cancel order'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppDesignSystem.errorRed,
-                  side: const BorderSide(color: AppDesignSystem.errorRed),
                 ),
               ),
               const SizedBox(height: 16),
             ],
           ],
-          _StatusCard(status: status),
+          _StatusCard(order: order),
           const SizedBox(height: 16),
-          _InfoRow('Order', '#${OrderUiMapper.shortOrderId(order.id)}'),
+          _OrderIdRow(orderId: order.id),
           _InfoRow('Cook', chefName),
           if (kitchenName.isNotEmpty) _InfoRow('Kitchen', kitchenName),
           if (kitchenCity.isNotEmpty) _InfoRow('City', kitchenCity),
@@ -358,6 +303,7 @@ Future<void> _openCustomerCookChat(
         builder: (_) => NahamCustomerChatConversationScreen(
           chatId: conversationId,
           name: chefName.isNotEmpty ? chefName : 'Cook',
+          conversationType: 'customer-chef',
         ),
       ),
     );
@@ -458,13 +404,18 @@ class _OrderStatusTimeline extends StatelessWidget {
 }
 
 class _StatusCard extends StatelessWidget {
-  final OrderStatus status;
+  final OrderModel order;
 
-  const _StatusCard({required this.status});
+  const _StatusCard({required this.order});
 
   @override
   Widget build(BuildContext context) {
-    final label = _statusLabel(status);
+    final status = order.status;
+    final label = OrderDbStatus.customerFacingLabel(
+      order.dbStatus,
+      detail: true,
+      orderStatusFallback: order.status,
+    );
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppDesignSystem.radiusLarge)),
       child: Padding(
@@ -473,30 +424,13 @@ class _StatusCard extends StatelessWidget {
           children: [
             Icon(_statusIcon(status), color: _C.primary, size: 28),
             const SizedBox(width: 12),
-            Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _C.text)),
+            Expanded(
+              child: Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _C.text)),
+            ),
           ],
         ),
       ),
     );
-  }
-
-  String _statusLabel(OrderStatus s) {
-    switch (s) {
-      case OrderStatus.pending:
-        return 'Waiting for acceptance';
-      case OrderStatus.accepted:
-        return 'Accepted';
-      case OrderStatus.rejected:
-        return 'Rejected';
-      case OrderStatus.preparing:
-        return 'Preparing';
-      case OrderStatus.ready:
-        return 'Ready';
-      case OrderStatus.completed:
-        return 'Completed';
-      case OrderStatus.cancelled:
-        return 'Cancelled';
-    }
   }
 
   IconData _statusIcon(OrderStatus s) {
@@ -516,6 +450,44 @@ class _StatusCard extends StatelessWidget {
       case OrderStatus.cancelled:
         return Icons.cancel;
     }
+  }
+}
+
+class _OrderIdRow extends StatelessWidget {
+  final String orderId;
+
+  const _OrderIdRow({required this.orderId});
+
+  @override
+  Widget build(BuildContext context) {
+    final short = OrderUiMapper.shortOrderId(orderId);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(width: 120, child: Text('Order', style: TextStyle(color: _C.textSub))),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '#$short',
+                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: _C.primary),
+                ),
+                if (orderId.trim().isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  SelectableText(
+                    orderId,
+                    style: TextStyle(fontSize: 12, color: _C.textSub, height: 1.3),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

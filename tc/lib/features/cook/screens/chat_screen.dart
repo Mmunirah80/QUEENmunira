@@ -5,13 +5,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart' hide TextDirection;
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/supabase/supabase_config.dart';
 import '../../../core/theme/app_design_system.dart';
 import '../../../core/utils/supabase_error_message.dart';
 import '../../../core/widgets/loading_widget.dart';
 import '../../../core/widgets/naham_empty_screens.dart';
 import '../../auth/presentation/providers/auth_provider.dart';
+import '../../../features/chat/presentation/chat_composer_policy.dart';
+import '../../../features/chat/presentation/widgets/chat_design_tokens.dart';
+import '../../../features/chat/presentation/widgets/chat_message_bubble.dart';
+import '../../../features/chat/presentation/widgets/chat_message_thread_row.dart';
+import '../../../features/chat/presentation/widgets/chat_read_only_banner.dart';
+import '../../../features/chat/presentation/widgets/naham_chat_input_bar.dart';
+import '../../../features/cook/presentation/providers/chef_providers.dart';
 import '../../../features/chat/presentation/providers/chat_provider.dart';
 import '../../../features/orders/presentation/providers/orders_provider.dart';
 import '../../chat/domain/entities/chat_entity.dart';
@@ -65,7 +72,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     final ids = chats.map((c) => c.userId).where((id) => id.isNotEmpty).toSet().toList();
     if (ids.isEmpty) return {};
     try {
-      final rows = await Supabase.instance.client
+      final rows = await SupabaseConfig.dataClient
           .from('profiles')
           .select('id,full_name')
           .inFilter('id', ids);
@@ -188,6 +195,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                         builder: (_) => CookChatConversationScreen(
                           name: name,
                           chatId: chat.id,
+                          isSupportConversation: true,
                         ),
                       ),
                     ),
@@ -569,12 +577,15 @@ class CookChatConversationScreen extends ConsumerStatefulWidget {
   final String name;
   final String chatId;
   final String? orderId;
+  /// Admin ↔ cook support thread (labels: Admin / Cook). Customer order chats use Customer / Cook.
+  final bool isSupportConversation;
 
   const CookChatConversationScreen({
     super.key,
     required this.name,
     required this.chatId,
     this.orderId,
+    this.isSupportConversation = false,
   });
 
   @override
@@ -583,6 +594,7 @@ class CookChatConversationScreen extends ConsumerStatefulWidget {
 
 class _CookChatConversationScreenState extends ConsumerState<CookChatConversationScreen> {
   final _ctrl = TextEditingController();
+  bool _sending = false;
 
   @override
   void initState() {
@@ -601,13 +613,21 @@ class _CookChatConversationScreenState extends ConsumerState<CookChatConversatio
     super.dispose();
   }
 
-  void _send() {
+  Future<void> _send() async {
     final content = _ctrl.text.trim();
-    if (content.isEmpty) return;
+    if (content.isEmpty || _sending) return;
+    if (!ChatComposerPolicy.showComposer(
+      accountMessagingBlocked: ref.read(authStateProvider).valueOrNull?.isBlocked == true,
+      chefKitchenSuspended: ref.read(chefDocStreamProvider).valueOrNull?.suspended == true,
+    )) {
+      return;
+    }
+    setState(() => _sending = true);
     _ctrl.clear();
-    ref.read(chatRepositoryProvider).sendMessage(widget.chatId, content).then((_) {
+    try {
+      await ref.read(chatRepositoryProvider).sendMessage(widget.chatId, content);
       if (mounted) ref.invalidate(chatsProvider);
-    }).catchError((Object e) {
+    } catch (e) {
       debugPrint('[CookChat] send message error=$e');
       if (mounted) {
         _ctrl.text = content;
@@ -615,7 +635,9 @@ class _CookChatConversationScreenState extends ConsumerState<CookChatConversatio
           SnackBar(content: Text(userFriendlyErrorMessage(e))),
         );
       }
-    });
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
   }
 
   @override
@@ -624,7 +646,22 @@ class _CookChatConversationScreenState extends ConsumerState<CookChatConversatio
     final messagesAsync = useMockChat
         ? ref.watch(messagesProvider(widget.chatId))
         : ref.watch(messagesStreamProvider(widget.chatId));
-    final currentUserId = ref.watch(authStateProvider).valueOrNull?.id ?? '';
+    final authUser = ref.watch(authStateProvider).valueOrNull;
+    final currentUserId = authUser?.id ?? '';
+    final kitchenName =
+        ref.watch(chefDocStreamProvider).valueOrNull?.kitchenName?.trim() ?? '';
+    final authName = authUser?.name.trim() ?? '';
+    final myKitchenLabel =
+        kitchenName.isNotEmpty ? kitchenName : (authName.isNotEmpty ? authName : 'Kitchen');
+    final chefSuspended = ref.watch(chefDocStreamProvider).valueOrNull?.suspended == true;
+    final accountBlocked = authUser?.isBlocked == true;
+    final showComposer = ChatComposerPolicy.showComposer(
+      accountMessagingBlocked: accountBlocked,
+      chefKitchenSuspended: chefSuspended,
+    );
+    final readOnlyMessage = accountBlocked
+        ? "Your account can't send messages right now."
+        : 'Messaging is paused while your kitchen account is under review.';
 
     return Directionality(
       textDirection: TextDirection.ltr,
@@ -651,6 +688,10 @@ class _CookChatConversationScreenState extends ConsumerState<CookChatConversatio
         ),
         body: Column(
           children: [
+            if (!showComposer)
+              ChatReadOnlyBanner(
+                message: readOnlyMessage,
+              ),
             Expanded(
               child: messagesAsync.when(
                 data: (messages) {
@@ -658,78 +699,70 @@ class _CookChatConversationScreenState extends ConsumerState<CookChatConversatio
                     return const Center(child: Text('No messages yet', style: TextStyle(color: _NC.textSub)));
                   }
                   return ListView.builder(
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(ChatDesignTokens.listHorizontalPadding),
                     itemCount: messages.length,
                     itemBuilder: (ctx, i) {
                       final msg = messages[i];
                       final isMe = msg.senderId == currentUserId;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: GestureDetector(
-                          onLongPress: isMe && !useMockChat
-                              ? () async {
-                                  final confirmed = await showDialog<bool>(
-                                    context: context,
-                                    builder: (ctx) => AlertDialog(
-                                      title: const Text('Delete message'),
-                                      content: const Text('Delete this message?'),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () => Navigator.pop(ctx, false),
-                                          child: const Text('Cancel'),
-                                        ),
-                                        TextButton(
-                                          onPressed: () => Navigator.pop(ctx, true),
-                                          child: const Text('Delete'),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                  if (confirmed == true) {
-                                    try {
-                                      await Supabase.instance.client
-                                          .from('messages')
-                                          .delete()
-                                          .eq('id', msg.id);
-                                      if (mounted) {
-                                        ref.invalidate(messagesProvider(widget.chatId));
-                                        ref.invalidate(
-                                          messagesStreamProvider(widget.chatId),
-                                        );
-                                      }
-                                    } catch (e) {
-                                      if (mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                          SnackBar(content: Text(userFriendlyErrorMessage(e))),
-                                        );
-                                      }
+                      final tone = isMe
+                          ? ChatBubbleTone.outgoing
+                          : (widget.isSupportConversation
+                              ? ChatBubbleTone.support
+                              : ChatBubbleTone.incoming);
+                      final senderLabel = isMe
+                          ? myKitchenLabel
+                          : (widget.isSupportConversation
+                              ? 'Support'
+                              : (widget.name.trim().isNotEmpty ? widget.name : 'Customer'));
+                      final timeLabel = DateFormat.jm().format(msg.timestamp.toLocal());
+                      return GestureDetector(
+                        onLongPress: showComposer && isMe && !useMockChat
+                            ? () async {
+                                final confirmed = await showDialog<bool>(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    title: const Text('Delete message'),
+                                    content: const Text('Delete this message?'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(ctx, false),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(ctx, true),
+                                        child: const Text('Delete'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (confirmed == true) {
+                                  try {
+                                    await SupabaseConfig.dataClient
+                                        .from('messages')
+                                        .delete()
+                                        .eq('id', msg.id);
+                                    if (mounted) {
+                                      ref.invalidate(messagesProvider(widget.chatId));
+                                      ref.invalidate(
+                                        messagesStreamProvider(widget.chatId),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text(userFriendlyErrorMessage(e))),
+                                      );
                                     }
                                   }
                                 }
-                              : null,
-                          child: Row(
-                            mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-                            children: [
-                              Flexible(
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                  decoration: BoxDecoration(
-                                    color: isMe ? _NC.primary : _NC.surface,
-                                    borderRadius: BorderRadius.only(
-                                      topLeft: const Radius.circular(18),
-                                      topRight: const Radius.circular(18),
-                                      bottomLeft: Radius.circular(isMe ? 18 : 4),
-                                      bottomRight: Radius.circular(isMe ? 4 : 18),
-                                    ),
-                                  ),
-                                  child: Text(
-                                    msg.content,
-                                    style: TextStyle(fontSize: 14, color: isMe ? Colors.white : _NC.text),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
+                              }
+                            : null,
+                        child: ChatMessageThreadRow(
+                          roleLabel: senderLabel,
+                          tone: tone,
+                          alignEnd: isMe,
+                          text: msg.content,
+                          timeLabel: timeLabel,
                         ),
                       );
                     },
@@ -750,38 +783,14 @@ class _CookChatConversationScreenState extends ConsumerState<CookChatConversatio
                 ),
               ),
             ),
-            Container(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
-              color: _NC.surface,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _ctrl,
-                      decoration: InputDecoration(
-                        hintText: 'Type a message...',
-                        hintStyle: const TextStyle(color: _NC.textSub, fontSize: 14),
-                        filled: true,
-                        fillColor: _NC.bg,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      ),
-                      onSubmitted: (_) => _send(),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: _send,
-                    child: Container(
-                      width: 44,
-                      height: 44,
-                      decoration: const BoxDecoration(color: _NC.primary, shape: BoxShape.circle),
-                      child: const Icon(Icons.send_rounded, color: Colors.white, size: 20),
-                    ),
-                  ),
-                ],
+            if (showComposer)
+              NahamChatInputBar(
+                controller: _ctrl,
+                sending: _sending,
+                onSend: _send,
+                surfaceColor: _NC.surface,
+                fillColor: _NC.bg,
               ),
-            ),
           ],
         ),
       ),

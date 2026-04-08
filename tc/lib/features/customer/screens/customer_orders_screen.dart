@@ -12,9 +12,11 @@ import 'package:naham_cook_app/features/orders/presentation/widgets/orders_strea
 import 'package:naham_cook_app/features/auth/presentation/providers/auth_provider.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
 import 'package:naham_cook_app/features/orders/data/models/order_model.dart';
+import 'package:naham_cook_app/features/orders/data/order_db_status.dart';
 import 'package:naham_cook_app/features/orders/domain/entities/order_entity.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_order_details_screen.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_waiting_for_chef_screen.dart';
+import 'package:naham_cook_app/features/customer/widgets/pending_chef_response_countdown.dart';
 import 'package:naham_cook_app/features/customer/widgets/skeleton_box.dart';
 
 class _C {
@@ -379,7 +381,11 @@ class _OrderCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dateStr = _formatDate(order.createdAt);
-    final statusStr = _statusLabel(order.status);
+    final statusStr = OrderDbStatus.customerFacingLabel(
+      order.dbStatus,
+      cancelReason: order.cancelReason,
+      orderStatusFallback: order.status,
+    );
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -395,13 +401,27 @@ class _OrderCard extends StatelessWidget {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    '#${OrderUiMapper.shortOrderId(order.id)}',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                      color: _C.primary,
-                    ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '#${OrderUiMapper.shortOrderId(order.id)}',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                          color: _C.primary,
+                        ),
+                      ),
+                      if (order.id.trim().isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          order.id,
+                          style: const TextStyle(fontSize: 11, color: _C.textSub, height: 1.2),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ],
                   ),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -425,6 +445,14 @@ class _OrderCard extends StatelessWidget {
                 dateStr,
                 style: const TextStyle(fontSize: 12, color: _C.textSub),
               ),
+              if (order.status == OrderStatus.pending) ...[
+                const SizedBox(height: 8),
+                PendingChefResponseCountdown(
+                  createdAtUtc: order.createdAt,
+                  strongColor: _C.primary,
+                  mutedColor: _C.textSub,
+                ),
+              ],
               const SizedBox(height: 4),
               Text(
                 order.chefName ?? 'Cook',
@@ -453,25 +481,6 @@ class _OrderCard extends StatelessWidget {
 
   String _formatDate(DateTime d) {
     return '${d.year}/${d.month}/${d.day} ${d.hour}:${d.minute.toString().padLeft(2, '0')}';
-  }
-
-  String _statusLabel(OrderStatus s) {
-    switch (s) {
-      case OrderStatus.pending:
-        return 'Waiting';
-      case OrderStatus.accepted:
-        return 'Accepted';
-      case OrderStatus.rejected:
-        return 'Rejected';
-      case OrderStatus.preparing:
-        return 'Preparing';
-      case OrderStatus.ready:
-        return 'Ready';
-      case OrderStatus.completed:
-        return 'Completed';
-      case OrderStatus.cancelled:
-        return 'Cancelled';
-    }
   }
 
   // Badge background colors:

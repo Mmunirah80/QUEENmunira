@@ -11,8 +11,11 @@ extension ContextExtensions on BuildContext {
 }
 
 extension StringExtensions on String {
+  /// Practical email check (trimmed). Not full RFC — good for client-side hints.
   bool get isValidEmail {
-    return RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(this);
+    final t = trim();
+    if (t.isEmpty) return false;
+    return RegExp(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$').hasMatch(t);
   }
 
   bool get isValidPhone {

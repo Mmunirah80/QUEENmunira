@@ -25,17 +25,30 @@ class RouteNames {
   static const String chefChat = '/chef/chat';
   static const String chefProfile = '/chef/profile';
   static const String chefInspectionCall = '/chef/inspection-call';
+  /// Past inspection sessions (compliance history).
+  static const String chefComplianceHistory = '/chef/compliance-history';
   static const String chefFrozen = '/chef/frozen';
   static const String chefBlocked = '/chef/blocked';
   static const String cookPending = '/chef/pending';
+
+  /// Upload / manage verification documents when not yet fully approved (no shell access).
+  static const String chefVerificationDocuments = '/chef/verification-documents';
 
   /// Unified suspended account (customer + chef); prefer over [chefBlocked].
   static const String accountSuspended = '/account-suspended';
 
   static const String adminHome = '/admin';
+  /// Violations ledger from random inspections ([chef_violations]).
+  static const String adminInspectionCompliance = '/admin/inspection-compliance';
 
-  // ─── Customer app (Naham customer: single screen with internal nav) ───
+  /// Admin user drill-down: `/admin/user/{uuid}`.
+  static String adminUserDetail(String userId) => '$adminHome/user/$userId';
+
+  // ─── Customer app ───────────────────────────────────────────────────────
+  /// Registered in GoRouter: [customerRoot] only. Shell uses IndexedStack; other paths
+  /// below are in-app (Navigator) or legacy aliases — not top-level GoRouter routes.
   static const String customerRoot = '/customer';
+  /// In-app stack routes (see [CustomerMainNavigationScreen] and customer screens).
   static const String customerHome = '/customer/home';
   static const String customerExplore = '/customer/explore';
   static const String customerReels = '/customer/reels';

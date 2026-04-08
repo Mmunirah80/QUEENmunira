@@ -5,7 +5,6 @@ import 'package:naham_cook_app/core/theme/app_design_system.dart';
 import 'package:naham_cook_app/features/auth/presentation/providers/auth_provider.dart';
 import 'package:naham_cook_app/features/customer/naham_customer_screens.dart'
     show
-        NahamCustomerAddressesScreen,
         NahamCustomerEditProfileScreen,
         NahamCustomerFavoritesScreen,
         NahamCustomerNotificationsScreen;
@@ -86,20 +85,6 @@ class NahamCustomerProfileScreen extends ConsumerWidget {
                         Navigator.of(context).push(
                           MaterialPageRoute<void>(
                             builder: (_) => const NahamCustomerFavoritesScreen(),
-                          ),
-                        );
-                      },
-                    ),
-                    const Divider(height: 1),
-                    ListTile(
-                      leading: const Icon(Icons.location_on_outlined),
-                      title: const Text('Addresses'),
-                      subtitle: const Text('Manage delivery addresses'),
-                      trailing: const Icon(Icons.chevron_right_rounded),
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const NahamCustomerAddressesScreen(),
                           ),
                         );
                       },

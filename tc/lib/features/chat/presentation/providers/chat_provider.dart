@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../core/supabase/supabase_config.dart';
 import '../../../auth/domain/entities/user_entity.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../../orders/presentation/providers/orders_provider.dart';
@@ -8,6 +9,8 @@ import '../../data/chat_limits.dart';
 import '../../data/datasources/chat_mock_datasource.dart';
 import '../../data/datasources/cook_chat_supabase_datasource.dart';
 import '../../data/repositories/chat_repository_impl.dart';
+import '../../domain/chat_conversation_scope.dart';
+import '../../domain/chat_unread_policy.dart';
 import '../../domain/entities/chat_entity.dart';
 import '../../domain/repositories/chat_repository.dart';
 
@@ -83,11 +86,12 @@ final chatsStreamProvider = StreamProvider<List<ChatEntity>>((ref) {
       .from('conversations')
       .stream(primaryKey: ['id'])
       .asyncMap((rows) async {
-    final scopedRows = rows.where((row) {
-      final rowChefId = (row['chef_id'] ?? '').toString();
-      final rowType = (row['type'] ?? '').toString();
-      return rowChefId == chefId && rowType == 'customer-chef';
-    }).toList();
+    final scopedRows = rows
+        .where((row) => ChatConversationScope.chefCustomerChefInboxRow(
+              row: row as Map<String, dynamic>,
+              sessionChefId: chefId,
+            ))
+        .toList();
 
     final chats = <ChatEntity>[];
     final conversationIds = scopedRows
@@ -119,13 +123,10 @@ final chatsStreamProvider = StreamProvider<List<ChatEntity>>((ref) {
         }
       }
       for (final entry in recentByConv.entries) {
-        var n = 0;
-        for (final m in entry.value) {
-          final senderId = (m['sender_id'] ?? '').toString();
-          final isRead = m['is_read'] as bool? ?? false;
-          if (senderId != chefId && !isRead) n++;
-        }
-        unreadByConversation[entry.key] = n;
+        unreadByConversation[entry.key] = ChatUnreadPolicy.unreadFromRecentBucket(
+          entry.value,
+          selfUserId: chefId,
+        );
       }
     }
 
@@ -167,15 +168,16 @@ final chefAdminSupportChatsStreamProvider =
   final chefId = user?.id ?? '';
   if (chefId.isEmpty) return const Stream<List<ChatEntity>>.empty();
 
-  return Supabase.instance.client
+  return SupabaseConfig.dataClient
       .from('conversations')
       .stream(primaryKey: ['id'])
       .asyncMap((rows) async {
-    final scopedRows = rows.where((row) {
-      final rowChefId = (row['chef_id'] ?? '').toString();
-      final rowType = (row['type'] ?? '').toString();
-      return rowChefId == chefId && rowType == 'chef-admin';
-    }).toList();
+    final scopedRows = rows
+        .where((row) => ChatConversationScope.chefAdminSupportInboxRow(
+              row: row as Map<String, dynamic>,
+              sessionChefId: chefId,
+            ))
+        .toList();
 
     final chats = <ChatEntity>[];
     final conversationIds = scopedRows
@@ -186,12 +188,16 @@ final chefAdminSupportChatsStreamProvider =
     final lastMessageByConversation = <String, Map<String, dynamic>>{};
     final unreadByConversation = <String, int>{};
     if (conversationIds.isNotEmpty) {
-      final msgRows = await Supabase.instance.client
+      final cap = (conversationIds.length * ChatLimits.recentMessagesForUnread)
+          .clamp(ChatLimits.recentMessagesForUnread, ChatLimits.maxInboxBatchMessageRows);
+      final msgRows = await SupabaseConfig.dataClient
           .from('messages')
           .select('conversation_id,sender_id,content,created_at,is_read')
           .inFilter('conversation_id', conversationIds)
-          .order('created_at', ascending: false);
+          .order('created_at', ascending: false)
+          .limit(cap);
 
+      final recentByConv = <String, List<Map<String, dynamic>>>{};
       for (final raw in (msgRows as List)) {
         final m = raw as Map<String, dynamic>;
         final conversationId = (m['conversation_id'] ?? '').toString();
@@ -199,12 +205,16 @@ final chefAdminSupportChatsStreamProvider =
 
         lastMessageByConversation.putIfAbsent(conversationId, () => m);
 
-        final senderId = (m['sender_id'] ?? '').toString();
-        final isRead = m['is_read'] as bool? ?? false;
-        if (senderId != chefId && !isRead) {
-          unreadByConversation[conversationId] =
-              (unreadByConversation[conversationId] ?? 0) + 1;
+        final bucket = recentByConv.putIfAbsent(conversationId, () => []);
+        if (bucket.length < ChatLimits.recentMessagesForUnread) {
+          bucket.add(m);
         }
+      }
+      for (final entry in recentByConv.entries) {
+        unreadByConversation[entry.key] = ChatUnreadPolicy.unreadFromRecentBucket(
+          entry.value,
+          selfUserId: chefId,
+        );
       }
     }
 
@@ -245,7 +255,7 @@ final messagesProvider = FutureProvider.family<List<MessageEntity>, String>((ref
 final messagesStreamProvider =
     StreamProvider.family<List<MessageEntity>, String>((ref, chatId) {
   if (chatId.isEmpty) return const Stream<List<MessageEntity>>.empty();
-  return Supabase.instance.client
+  return SupabaseConfig.dataClient
       .from('messages')
       .stream(primaryKey: ['id'])
       .eq('conversation_id', chatId)
@@ -261,7 +271,7 @@ final messagesStreamProvider =
           return MessageEntity(
             id: (row['id'] ?? '').toString(),
             chatId: (row['conversation_id'] ?? chatId).toString(),
-            senderId: (row['sender_id'] ?? '').toString(),
+            senderId: (row['sender_id'] ?? '').toString().trim(),
             content: (row['content'] ?? '').toString(),
             timestamp: createdAt,
             isRead: row['is_read'] as bool? ?? false,

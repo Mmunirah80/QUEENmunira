@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS public.chef_documents (
   rejection_reason text,
   reviewed_by uuid REFERENCES public.profiles (id) ON DELETE SET NULL,
   reviewed_at timestamptz,
+  no_expiry boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT chef_documents_document_type_allowed
@@ -59,7 +60,8 @@ ALTER TABLE public.chef_documents
   ADD COLUMN IF NOT EXISTS reviewed_by uuid REFERENCES public.profiles (id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS reviewed_at timestamptz,
   ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now(),
-  ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+  ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS no_expiry boolean NOT NULL DEFAULT false;
 
 UPDATE public.chef_documents SET id = gen_random_uuid() WHERE id IS NULL;
 

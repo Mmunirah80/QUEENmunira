@@ -3,6 +3,8 @@
 // Dishes from chefDishesForCustomerStreamProvider; Reels from myReelsStreamProvider(chefId).
 // ============================================================
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -57,7 +59,7 @@ class _ChefProfileScreenState extends ConsumerState<ChefProfileScreen> with Sing
   @override
   Widget build(BuildContext context) {
     final dishesAsync = ref.watch(chefDishesForCustomerStreamProvider(widget.chefId));
-    final chefsAsync = ref.watch(chefsForCustomerStreamProvider);
+    final chefProfileAsync = ref.watch(customerChefProfileProvider(widget.chefId));
     final pickupOrigin = ref.watch(customerPickupOriginProvider);
     final favoriteIds = ref.watch(favoriteDishIdsStreamProvider).valueOrNull ?? [];
     final uid = ref.watch(customerIdProvider);
@@ -83,17 +85,41 @@ class _ChefProfileScreenState extends ConsumerState<ChefProfileScreen> with Sing
           ],
         ),
       ),
-      body: chefsAsync.when(
-        data: (chefs) {
-          ChefDocModel? chef;
-          for (final c in chefs) {
-            if (c.chefId == widget.chefId) {
-              chef = c;
-              break;
-            }
+      body: chefProfileAsync.when(
+        data: (chef) {
+          if (chef == null) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.store_mall_directory_outlined, size: 64, color: _C.textSub),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'This kitchen isn\'t available',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'It may be suspended or no longer listed.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 14, color: _C.textSub, height: 1.35),
+                    ),
+                    const SizedBox(height: 24),
+                    FilledButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: FilledButton.styleFrom(backgroundColor: _C.primary, foregroundColor: Colors.white),
+                      child: const Text('Go back'),
+                    ),
+                  ],
+                ),
+              ),
+            );
           }
-          final kitchenName = chef?.kitchenName ?? 'Kitchen';
-          final pickupDistLabel = pickupOrigin != null && chef != null
+          final kitchenName = chef.kitchenName ?? 'Kitchen';
+          final pickupDistLabel = pickupOrigin != null
               ? pickupDistanceLabelForChef(chef, pickupOrigin.latitude, pickupOrigin.longitude)
               : null;
           return Column(
@@ -101,11 +127,11 @@ class _ChefProfileScreenState extends ConsumerState<ChefProfileScreen> with Sing
             children: [
               _ChefHeader(
                 kitchenName: kitchenName,
-                bio: chef?.bio,
-                isOnline: chef?.isOnline ?? false,
-                kitchenCity: chef?.kitchenCity,
-                kitchenLatitude: chef?.kitchenLatitude,
-                kitchenLongitude: chef?.kitchenLongitude,
+                bio: chef.bio,
+                isOnline: chef.isOnline,
+                kitchenCity: chef.kitchenCity,
+                kitchenLatitude: chef.kitchenLatitude,
+                kitchenLongitude: chef.kitchenLongitude,
               ),
               Expanded(
                 child: TabBarView(
@@ -118,10 +144,44 @@ class _ChefProfileScreenState extends ConsumerState<ChefProfileScreen> with Sing
                 hasPickupPoint: pickupOrigin != null,
                 pickupDistanceLabel: pickupDistLabel,
                 onAddToCart: (dish) {
-                  ref.read(cartProvider.notifier).add(dish, widget.chefId, kitchenName);
-                  if (mounted) {
-                    SnackbarHelper.success(context, '${dish.name} added to cart');
+                  Future<void> add() async {
+                    final blocked = await ref
+                        .read(chefOrderingDisabledForCustomerProvider(widget.chefId).future);
+                    if (!context.mounted) return;
+                    if (blocked) {
+                      SnackbarHelper.error(context, 'This kitchen isn\'t taking orders right now.');
+                      return;
+                    }
+                    final cartItems = ref.read(cartProvider);
+                    final inCart = cartQuantityForDishChef(cartItems, dish.id, widget.chefId);
+                    final remaining = dish.remainingQuantity;
+                    if (remaining <= 0) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('This dish is sold out'),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                      return;
+                    }
+                    if (inCart >= remaining) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Only $remaining available from this cook'),
+                          backgroundColor: Colors.orange,
+                        ),
+                      );
+                      return;
+                    }
+                    ref.read(cartProvider.notifier).add(dish, widget.chefId, kitchenName);
+                    if (context.mounted) {
+                      SnackbarHelper.success(context, '${dish.name} added to cart');
+                    }
                   }
+
+                  unawaited(add());
                 },
                 favoriteDishIds: favoriteIds,
                 customerId: uid,
@@ -145,7 +205,16 @@ class _ChefProfileScreenState extends ConsumerState<ChefProfileScreen> with Sing
           );
         },
         loading: () => const Center(child: LoadingWidget()),
-        error: (e, _) => Center(child: Text('Error: ${userFriendlyErrorMessage(e)}', style: const TextStyle(color: AppDesignSystem.errorRed))),
+        error: (e, _) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              userFriendlyErrorMessage(e, fallback: 'Could not load this kitchen.'),
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: AppDesignSystem.errorRed),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -314,7 +383,7 @@ class _DishesTab extends StatelessWidget {
               physics: const NeverScrollableScrollPhysics(),
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: 2,
-                childAspectRatio: 0.72,
+                childAspectRatio: 0.62,
                 crossAxisSpacing: 12,
                 mainAxisSpacing: 12,
               ),
@@ -352,6 +421,10 @@ class _ChefReelsGridTab extends ConsumerWidget {
   const _ChefReelsGridTab({required this.chefId});
 
   Future<void> _addReelDishToCart(WidgetRef ref, BuildContext context, ReelEntity reel) async {
+    if (reel.chefOrderingDisabled) {
+      SnackbarHelper.error(context, 'Temporarily unavailable');
+      return;
+    }
     final dishId = reel.dishId;
     if (dishId == null || dishId.isEmpty) return;
     final uid = ref.read(customerIdProvider);
@@ -365,6 +438,17 @@ class _ChefReelsGridTab extends ConsumerWidget {
       if (!dish.isAvailable || dish.remainingQuantity <= 0) {
         if (context.mounted) {
           SnackbarHelper.error(context, 'This dish is unavailable right now');
+        }
+        return;
+      }
+      final cartItems = ref.read(cartProvider);
+      final inCart = cartQuantityForDishChef(cartItems, dish.id, reel.chefId);
+      if (inCart >= dish.remainingQuantity) {
+        if (context.mounted) {
+          SnackbarHelper.error(
+            context,
+            'Only ${dish.remainingQuantity} available from this cook',
+          );
         }
         return;
       }
@@ -382,6 +466,8 @@ class _ChefReelsGridTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(myReelsStreamProvider(chefId));
+    final orderingBlocked =
+        ref.watch(chefOrderingDisabledForCustomerProvider(chefId)).valueOrNull ?? false;
     return async.when(
       data: (reels) {
         if (reels.isEmpty) {
@@ -410,8 +496,10 @@ class _ChefReelsGridTab extends ConsumerWidget {
                         fit: StackFit.expand,
                         children: [
                           ReelVideoPage(
+                            key: ValueKey(r.id),
                             reel: r,
                             isActive: true,
+                            orderingDisabled: orderingBlocked,
                             onTapChef: (id) {
                               Navigator.of(pageCtx).pop();
                               Navigator.of(context).push(

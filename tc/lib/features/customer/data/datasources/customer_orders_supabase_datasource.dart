@@ -1,18 +1,23 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../../../core/debug/debug_auth_bypass.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../../orders/data/datasources/orders_datasource_exceptions.dart';
+import '../../../orders/data/order_db_status.dart';
+import '../../../orders/data/order_supabase_hydration.dart';
 import '../../../orders/domain/entities/order_entity.dart';
 import '../../../orders/data/models/order_model.dart';
 
-/// Supabase orders + order_items for customer: create order, watch by customer, watch single, cancel.
+/// Supabase orders + order_items for customer: create order, watch by customer, watch single, expire timeout.
 /// Tables: orders (id, customer_id, chef_id, status, total_amount, commission_amount, notes,
 ///         delivery_address, customer_name, chef_name, created_at, updated_at)
 ///         order_items (id, order_id, menu_item_id or dish_id, quantity, unit_price)
 class CustomerOrdersSupabaseDatasource {
-  SupabaseClient get _sb => SupabaseConfig.client;
+  SupabaseClient get _sb => SupabaseConfig.dataClient;
 
   /// `supabase_flutter` RPC returns the decoded JSON body directly (Map/List), not a `.data` wrapper.
   static Map<String, dynamic> _rpcBodyToMap(dynamic res) {
@@ -78,6 +83,32 @@ class CustomerOrdersSupabaseDatasource {
     );
   }
 
+  /// Best-effort restore after failed create; retries reduce transient network drift.
+  Future<void> _increaseRemainingQuantityWithRetry({
+    required String dishId,
+    required int quantity,
+  }) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await _increaseRemainingQuantity(dishId: dishId, quantity: quantity);
+        return;
+      } catch (e, st) {
+        lastError = e;
+        debugPrint(
+          '[CustomerOrdersSupabase] increase_remaining_quantity attempt ${attempt + 1}/3 dishId=$dishId: $e\n$st',
+        );
+        if (attempt < 2) {
+          await Future<void>.delayed(Duration(milliseconds: 200 * (attempt + 1)));
+        }
+      }
+    }
+    Error.throwWithStackTrace(
+      lastError ?? Exception('increase_remaining_quantity failed'),
+      StackTrace.current,
+    );
+  }
+
   /// Creates an order and its order_items. Commission already included in total_amount.
   /// Returns the new order id.
   Future<String> createOrder({
@@ -103,6 +134,19 @@ class CustomerOrdersSupabaseDatasource {
       return existingOrderId;
     }
 
+    final validItems = <Map<String, dynamic>>[];
+    for (final item in items) {
+      final dishId = (item['id'] as String?) ?? (item['dishId'] as String?);
+      final qty = (item['quantity'] as num?)?.toInt() ?? 1;
+      if (dishId == null || dishId.isEmpty || qty <= 0) continue;
+      validItems.add(item);
+    }
+    if (validItems.isEmpty) {
+      throw ArgumentError(
+        'No valid line items (each needs a dish id and quantity >= 1)',
+      );
+    }
+
     const uuid = Uuid();
     final orderId = uuid.v4();
     final now = DateTime.now().toUtc().toIso8601String();
@@ -112,7 +156,7 @@ class CustomerOrdersSupabaseDatasource {
     const status = 'pending';
     if (kDebugMode) {
       debugPrint(
-        '[CustomerOrdersSupabase] createOrder start customer=$customerId chef=$chefId items=${items.length}',
+        '[CustomerOrdersSupabase] createOrder start customer=$customerId chef=$chefId items=${validItems.length}',
       );
     }
     final orderPayload = {
@@ -131,7 +175,7 @@ class CustomerOrdersSupabaseDatasource {
       'updated_at': now,
     };
     debugPrint('[CustomerOrdersSupabase] Order payload: $orderPayload');
-    final orderItems = items.map<Map<String, dynamic>>((e) {
+    final orderItems = validItems.map<Map<String, dynamic>>((e) {
       final itemId = uuid.v4();
       final dishId = e['id'] as String? ?? e['dishId'] as String?;
       final row = {
@@ -151,10 +195,11 @@ class CustomerOrdersSupabaseDatasource {
     try {
       // Decrease remaining quantities first (atomic on DB side) to prevent overselling.
       // We will restore if order insert fails.
-      for (final item in items) {
-        final dishId = (item['id'] as String?) ?? (item['dishId'] as String?);
+      for (final item in validItems) {
+        // [validItems] only contains rows with non-empty dish id and qty >= 1.
+        final dishId =
+            ((item['id'] as String?) ?? (item['dishId'] as String?))!;
         final qty = (item['quantity'] as num?)?.toInt() ?? 1;
-        if (dishId == null || dishId.isEmpty || qty <= 0) continue;
 
         if (kDebugMode) {
           debugPrint(
@@ -200,7 +245,10 @@ class CustomerOrdersSupabaseDatasource {
       if (decremented.isNotEmpty) {
         for (final d in decremented) {
           try {
-            await _increaseRemainingQuantity(dishId: d.dishId, quantity: d.quantity);
+            await _increaseRemainingQuantityWithRetry(
+              dishId: d.dishId,
+              quantity: d.quantity,
+            );
           } catch (_) {
             // Non-fatal: better to preserve the order error than hide a restoration error.
             debugPrint(
@@ -313,8 +361,15 @@ class CustomerOrdersSupabaseDatasource {
     return list.isNotEmpty ? list.first : null;
   }
 
-  /// Customer-only transitions via [transition_order_status] (cancel / expire while pending).
-  Future<void> _customerTransitionOrderStatus(String orderId, String newStatus) async {
+  /// Customer-side transitions via [transition_order_status].
+  /// Customers may only trigger **system** cancellations (`system_cancelled_frozen`) with
+  /// [customerSystemCancel] — used for acceptance-timeout and payment-failure rollback (not a user "cancel" button).
+  Future<void> _customerTransitionOrderStatus(
+    String orderId,
+    String newStatus, {
+    String? cancelReason,
+    bool customerSystemCancel = false,
+  }) async {
     final current = await _sb
         .from('orders')
         .select('updated_at')
@@ -327,101 +382,153 @@ class CustomerOrdersSupabaseDatasource {
         'order_id': orderId,
         'new_status': newStatus,
         'expected_updated_at': expectedUpdatedAt,
+        if (cancelReason != null) 'cancel_reason': cancelReason,
+        'customer_system_cancel': customerSystemCancel,
       },
     );
   }
 
-  Future<void> cancelOrderByCustomer(String orderId) async {
-    await _customerTransitionOrderStatus(orderId, 'cancelled_by_customer');
-  }
-
-  /// Timeout safeguard: move waiting orders to terminal expired state via backend.
-  /// Stock restoration is expected to be handled server-side once.
+  /// Timeout safeguard: move waiting orders to unified `cancelled` + system reason via backend.
   Future<void> expireOrderByTimeout(String orderId) async {
-    await _customerTransitionOrderStatus(orderId, 'expired');
+    await _customerTransitionOrderStatus(
+      orderId,
+      'cancelled',
+      cancelReason: OrderDbStatus.internalSystemCancelledFrozen,
+      customerSystemCancel: true,
+    );
   }
 
-  Future<OrderModel?> _orderFromRow(Map<String, dynamic> r) async {
+  /// Rolls back a **pending** order after a failed payment / checkout attempt (all-or-nothing checkout).
+  /// This is not a discretionary customer cancel — it uses the same system reason as automated timeouts.
+  Future<void> cancelPendingOrderAfterPaymentFailure(String orderId) async {
+    final uid = effectiveSupabaseAuthUserId(_sb);
+    if (uid == null || uid.isEmpty) {
+      throw Exception('Not signed in');
+    }
+    final row = await _sb
+        .from('orders')
+        .select('customer_id,status')
+        .eq('id', orderId)
+        .maybeSingle();
+    if (row == null) {
+      throw Exception('Order not found');
+    }
+    if ((row['customer_id']?.toString() ?? '') != uid) {
+      throw Exception('Not your order');
+    }
+    final s = (row['status']?.toString() ?? '').trim();
+    if (!OrderDbStatus.pending.contains(s)) {
+      throw Exception('Only waiting orders can be voided after a failed checkout');
+    }
+    await _customerTransitionOrderStatus(
+      orderId,
+      'cancelled',
+      cancelReason: OrderDbStatus.internalSystemCancelledFrozen,
+      customerSystemCancel: true,
+    );
+  }
+
+  /// Live kitchen names keyed by chef id (from `chef_profiles`). Used so order cards match browse UI
+  /// and are not stuck on stale/wrong `orders.chef_name`.
+  Future<Map<String, String>> _fetchKitchenNamesByChefIds(Set<String> chefIds) async {
+    if (chefIds.isEmpty) return {};
+    final ids = chefIds.toList();
+    final out = <String, String>{};
+    const chunk = 80;
+    for (var i = 0; i < ids.length; i += chunk) {
+      final end = i + chunk > ids.length ? ids.length : i + chunk;
+      final slice = ids.sublist(i, end);
+      try {
+        final res = await _sb.from('chef_profiles').select('id,kitchen_name').inFilter('id', slice);
+        for (final row in res as List) {
+          final m = Map<String, dynamic>.from(row as Map);
+          final id = m['id']?.toString() ?? '';
+          final name = (m['kitchen_name'] as String?)?.trim() ?? '';
+          if (id.isNotEmpty && name.isNotEmpty) out[id] = name;
+        }
+      } catch (e, st) {
+        if (kDebugMode) {
+          debugPrint('[CustomerOrdersSupabase] kitchen_name batch fetch failed: $e\n$st');
+        }
+      }
+    }
+    return out;
+  }
+
+  String? _resolveChefDisplayName({
+    required Map<String, String> kitchenByChefId,
+    required String? chefId,
+    required String? orderChefName,
+  }) {
+    final cid = chefId?.trim();
+    if (cid != null && cid.isNotEmpty) {
+      final fromProfile = kitchenByChefId[cid];
+      if (fromProfile != null && fromProfile.isNotEmpty) return fromProfile;
+    }
+    final fromOrder = orderChefName?.trim();
+    if (fromOrder != null && fromOrder.isNotEmpty) return fromOrder;
+    return null;
+  }
+
+  OrderModel? _orderFromRowData(
+    Map<String, dynamic> r,
+    Map<String, String> kitchenByChefId,
+    List<OrderItemEntity> items,
+  ) {
     final id = r['id'] as String?;
     if (id == null) return null;
-    final items = await _fetchOrderItems(id);
-    final status = _orderStatusFromString(r['status'] as String?);
+    final rawStatus = r['status']?.toString();
+    final status = OrderDbStatus.domainFromDb(rawStatus);
+    final chefId = r['chef_id'] as String?;
+    final chefName = _resolveChefDisplayName(
+      kitchenByChefId: kitchenByChefId,
+      chefId: chefId,
+      orderChefName: r['chef_name'] as String?,
+    );
+    final comm = r['commission_amount'];
     return OrderModel(
       id: id,
       customerId: r['customer_id']?.toString(),
       customerName: r['customer_name'] as String? ?? '',
-      chefId: r['chef_id'] as String?,
-      chefName: r['chef_name'] as String?,
+      chefId: chefId,
+      chefName: chefName,
       items: items,
-      totalAmount: _toDouble(r['total_amount']),
+      totalAmount: OrderSupabaseHydration.toDouble(r['total_amount']),
+      commissionAmount:
+          comm == null ? null : OrderSupabaseHydration.toDouble(comm),
       status: status,
-      createdAt: _parseDate(r['created_at']),
+      dbStatus: rawStatus,
+      cancelReason: r['cancel_reason']?.toString(),
+      createdAt: OrderSupabaseHydration.parseOrderDate(r['created_at']),
       deliveryAddress: r['delivery_address'] as String?,
-      notes: (r['rejection_reason'] as String?)?.isNotEmpty == true
-          ? r['rejection_reason'] as String?
-          : r['notes'] as String?,
+      notes: OrderSupabaseHydration.resolveOrderNotesFromRow(status, r),
+      idempotencyKey: r['idempotency_key'] as String?,
     );
   }
 
   Future<List<OrderModel>> _ordersWithItems(List<Map<String, dynamic>> rows) async {
+    final chefIds = <String>{};
+    final orderIds = <String>[];
+    for (final r in rows) {
+      final cid = r['chef_id']?.toString().trim();
+      if (cid != null && cid.isNotEmpty) chefIds.add(cid);
+      final oid = r['id']?.toString();
+      if (oid != null && oid.isNotEmpty) orderIds.add(oid);
+    }
+    final kitchenByChefId = await _fetchKitchenNamesByChefIds(chefIds);
+    final itemsByOrder =
+        await OrderSupabaseHydration.fetchOrderItemsByOrderIds(_sb, orderIds);
     final orders = <OrderModel>[];
     for (final r in rows) {
-      final o = await _orderFromRow(r);
+      final oid = r['id']?.toString();
+      if (oid == null || oid.isEmpty) continue;
+      final o = _orderFromRowData(
+        r,
+        kitchenByChefId,
+        itemsByOrder[oid] ?? const [],
+      );
       if (o != null) orders.add(o);
     }
     return orders;
-  }
-
-  Future<List<OrderItemEntity>> _fetchOrderItems(String orderId) async {
-    final rows = await _sb.from('order_items').select().eq('order_id', orderId);
-    return (rows as List).map((r) {
-      final id = r['id'] as String? ?? '';
-      return OrderItemModel(
-        id: id,
-        dishName: r['dish_name'] as String? ?? 'Item',
-        quantity: (r['quantity'] as num?)?.toInt() ?? 1,
-        price: _toDouble(r['unit_price'] ?? r['price']),
-      );
-    }).toList();
-  }
-
-  static OrderStatus _orderStatusFromString(String? v) {
-    switch (v) {
-      case 'pending':
-      case 'paid_waiting_acceptance':
-        return OrderStatus.pending;
-      case 'accepted':
-        return OrderStatus.accepted;
-      case 'rejected':
-        return OrderStatus.rejected;
-      case 'preparing':
-        return OrderStatus.preparing;
-      case 'ready':
-        return OrderStatus.ready;
-      case 'completed':
-        return OrderStatus.completed;
-      case 'cancelled':
-      case 'cancelled_by_customer':
-      case 'cancelled_by_cook':
-      case 'cancelled_payment_failed':
-      case 'expired':
-        return OrderStatus.cancelled;
-      default:
-        return OrderStatus.pending;
-    }
-  }
-
-  static double _toDouble(dynamic x) {
-    if (x == null) return 0;
-    if (x is num) return x.toDouble();
-    if (x is String) return double.tryParse(x) ?? 0;
-    return 0;
-  }
-
-  static DateTime _parseDate(dynamic x) {
-    if (x == null) return DateTime.now();
-    if (x is DateTime) return x;
-    if (x is String) return DateTime.tryParse(x) ?? DateTime.now();
-    return DateTime.now();
   }
 }

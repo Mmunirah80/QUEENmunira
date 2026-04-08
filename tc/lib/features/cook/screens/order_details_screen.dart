@@ -4,11 +4,11 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
+import '../../../core/supabase/supabase_config.dart';
 import '../../../core/utils/supabase_error_message.dart';
 import '../../../core/widgets/snackbar_helper.dart';
 import '../../../features/auth/presentation/providers/auth_provider.dart';
+import '../presentation/providers/chef_providers.dart';
 import '../../../features/chat/presentation/providers/chat_provider.dart';
 import '../../../features/customer/presentation/providers/customer_providers.dart';
 import 'chat_screen.dart';
@@ -18,7 +18,6 @@ import '_order_reject_helper.dart';
 
 class _C {
   static const primary = Color(0xFF9B7EC8);
-  static const primaryLight = Color(0xFFE8E4F0);
   static const bg = Color(0xFFF5F0FF);
   static const surface = Color(0xFFFFFFFF);
   static const text = Color(0xFF1A1A1A);
@@ -81,7 +80,9 @@ Color _cookStatusAppBarChipColor(OrderStatus? s) {
   }
 }
 
-final _orderStatusActionInProgressProvider = StateProvider.autoDispose<bool>((ref) => false);
+/// Per-order guard so two different order detail routes do not block each other.
+final _orderStatusActionInProgressProvider =
+    StateProvider.family.autoDispose<bool, String>((ref, orderId) => false);
 
 /// [order] same map shape as in OrdersScreen (new/active/completed).
 /// [orderType] 'new' | 'active' | 'completed'.
@@ -103,8 +104,9 @@ class OrderDetailsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final actionInProgress = ref.watch(_orderStatusActionInProgressProvider);
     final oid = orderId ?? '';
+    final actionKey = oid.isNotEmpty ? oid : '_';
+    final actionInProgress = ref.watch(_orderStatusActionInProgressProvider(actionKey));
     final OrderEntity? live = oid.isNotEmpty ? ref.watch(cookOrderLiveProvider(oid)) : null;
     final OrderEntity? effective = live ?? orderEntity;
 
@@ -113,6 +115,7 @@ class OrderDetailsScreen extends ConsumerWidget {
     final isActive = phase == 'active';
     final status = effective?.status;
     final isCancelled = status == OrderStatus.cancelled || status == OrderStatus.rejected;
+    final hardFreeze = ref.watch(chefDocStreamProvider).valueOrNull?.isHardFreezeActive ?? false;
     debugPrint('[CookOrderDetails] orderId=$orderId, status=$status, phase=$phase (nav=$orderType)');
 
     return Scaffold(
@@ -221,9 +224,9 @@ class OrderDetailsScreen extends ConsumerWidget {
                     ),
                   ],
                   const SizedBox(height: 24),
-                  if (isNew) _buildNewActions(context, ref, actionInProgress),
+                  if (isNew) _buildNewActions(context, ref, actionInProgress, hardFreeze),
                   if (isActive && status != null && !isCancelled)
-                    _buildActiveActions(context, ref, effective, status, actionInProgress),
+                    _buildActiveActions(context, ref, effective, status, actionInProgress, hardFreeze),
                 ],
               ),
             ),
@@ -419,7 +422,7 @@ class OrderDetailsScreen extends ConsumerWidget {
 
   Future<List<Map<String, dynamic>>> _loadItemsFromSupabase(String id) async {
     try {
-      final res = await Supabase.instance.client
+      final res = await SupabaseConfig.dataClient
           .from('order_items')
           .select('dish_name, quantity, unit_price')
           .eq('order_id', id);
@@ -492,7 +495,13 @@ class OrderDetailsScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildNewActions(BuildContext context, WidgetRef ref, bool actionInProgress) {
+  Widget _buildNewActions(
+    BuildContext context,
+    WidgetRef ref,
+    bool actionInProgress,
+    bool hardFreeze,
+  ) {
+    final actionKey = (orderId ?? '').isNotEmpty ? orderId! : '_';
     return Row(
       children: [
         Expanded(
@@ -501,7 +510,7 @@ class OrderDetailsScreen extends ConsumerWidget {
               if (orderId == null) return;
               final reason = await showRejectReasonSheet(context);
               if (reason == null) return;
-              ref.read(_orderStatusActionInProgressProvider.notifier).state = true;
+              ref.read(_orderStatusActionInProgressProvider(actionKey).notifier).state = true;
               try {
                 await ref.read(ordersRepositoryProvider).rejectOrder(orderId!, reason: reason);
                 if (context.mounted) {
@@ -513,7 +522,7 @@ class OrderDetailsScreen extends ConsumerWidget {
                   SnackbarHelper.error(context, userFriendlyErrorMessage(e));
                 }
               } finally {
-                ref.read(_orderStatusActionInProgressProvider.notifier).state = false;
+                ref.read(_orderStatusActionInProgressProvider(actionKey).notifier).state = false;
               }
             },
             icon: const Icon(Icons.cancel_outlined, size: 18),
@@ -530,9 +539,11 @@ class OrderDetailsScreen extends ConsumerWidget {
         Expanded(
           flex: 2,
           child: ElevatedButton.icon(
-            onPressed: actionInProgress ? null : () async {
+            onPressed: actionInProgress || hardFreeze
+                ? null
+                : () async {
               if (orderId == null) return;
-              ref.read(_orderStatusActionInProgressProvider.notifier).state = true;
+              ref.read(_orderStatusActionInProgressProvider(actionKey).notifier).state = true;
               try {
                 await ref.read(ordersRepositoryProvider).acceptOrder(orderId!);
                 if (context.mounted) {
@@ -543,7 +554,7 @@ class OrderDetailsScreen extends ConsumerWidget {
                   SnackbarHelper.error(context, userFriendlyErrorMessage(e));
                 }
               } finally {
-                ref.read(_orderStatusActionInProgressProvider.notifier).state = false;
+                ref.read(_orderStatusActionInProgressProvider(actionKey).notifier).state = false;
               }
             },
             icon: actionInProgress
@@ -553,7 +564,13 @@ class OrderDetailsScreen extends ConsumerWidget {
                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                   )
                 : const Icon(Icons.check_circle_outline_rounded, size: 18),
-            label: Text(actionInProgress ? 'Please wait...' : 'Accept order'),
+            label: Text(
+              hardFreeze
+                  ? 'Accept blocked (hard freeze)'
+                  : actionInProgress
+                      ? 'Please wait...'
+                      : 'Accept order',
+            ),
             style: ElevatedButton.styleFrom(
               backgroundColor: _C.success,
               foregroundColor: Colors.white,
@@ -573,7 +590,9 @@ class OrderDetailsScreen extends ConsumerWidget {
     OrderEntity? entity,
     OrderStatus status,
     bool actionInProgress,
+    bool hardFreeze,
   ) {
+    final actionKey = (orderId ?? '').isNotEmpty ? orderId! : '_';
     final oid = orderId ?? '';
     final chatTail = oid.length > 8 ? oid.substring(oid.length - 8) : oid;
     final chatLabel =
@@ -637,7 +656,9 @@ class OrderDetailsScreen extends ConsumerWidget {
         const SizedBox(width: 12),
         Expanded(
           child: ElevatedButton.icon(
-            onPressed: actionInProgress ? null : () async {
+            onPressed: actionInProgress || hardFreeze
+                ? null
+                : () async {
               if (orderId == null) return;
               OrderStatus? next;
               if (status == OrderStatus.accepted) {
@@ -649,7 +670,7 @@ class OrderDetailsScreen extends ConsumerWidget {
               }
               if (next == null) return;
               debugPrint('[CookOrderDetails] Advance status: $status -> $next (orderId=$orderId)');
-              ref.read(_orderStatusActionInProgressProvider.notifier).state = true;
+              ref.read(_orderStatusActionInProgressProvider(actionKey).notifier).state = true;
               try {
                 await ref.read(ordersRepositoryProvider).updateOrderStatus(orderId!, next);
                 if (context.mounted) {
@@ -666,7 +687,7 @@ class OrderDetailsScreen extends ConsumerWidget {
                   SnackbarHelper.error(context, userFriendlyErrorMessage(e));
                 }
               } finally {
-                ref.read(_orderStatusActionInProgressProvider.notifier).state = false;
+                ref.read(_orderStatusActionInProgressProvider(actionKey).notifier).state = false;
               }
             },
             icon: actionInProgress
@@ -684,13 +705,15 @@ class OrderDetailsScreen extends ConsumerWidget {
                     size: 18,
                   ),
             label: Text(
-              actionInProgress
-                  ? 'Please wait...'
-                  : status == OrderStatus.accepted
-                      ? 'Start Preparing'
-                      : status == OrderStatus.preparing
-                          ? 'Mark Ready'
-                          : 'Complete',
+              hardFreeze
+                  ? 'Actions blocked (hard freeze)'
+                  : actionInProgress
+                      ? 'Please wait...'
+                      : status == OrderStatus.accepted
+                          ? 'Start Preparing'
+                          : status == OrderStatus.preparing
+                              ? 'Mark Ready'
+                              : 'Complete',
             ),
             style: ElevatedButton.styleFrom(
               backgroundColor: _C.primary,

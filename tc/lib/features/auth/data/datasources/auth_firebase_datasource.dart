@@ -14,8 +14,10 @@ class AuthFirebaseDataSource implements AuthRemoteDataSource {
       profileImageUrl: null,
       isVerified: false,
       role: role ?? AppRole.customer,
+      chefAccessLevel: null,
       chefApprovalStatus: null,
       rejectionReason: null,
+      isBlocked: false,
     );
   }
 
@@ -35,8 +37,10 @@ class AuthFirebaseDataSource implements AuthRemoteDataSource {
       profileImageUrl: null,
       isVerified: false,
       role: role ?? AppRole.customer,
+      chefAccessLevel: null,
       chefApprovalStatus: null,
       rejectionReason: null,
+      isBlocked: false,
     );
   }
 

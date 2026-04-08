@@ -1,5 +1,5 @@
 // ============================================================
-// ACCOUNT SUSPENDED — Blocked by admin (RLS + realtime).
+// ACCOUNT BLOCKED — Full screen; cook cannot use the app.
 // ============================================================
 
 import 'package:flutter/material.dart';
@@ -10,22 +10,18 @@ import '../../../core/constants/route_names.dart';
 import '../../../core/theme/app_design_system.dart';
 import '../../auth/presentation/providers/auth_provider.dart';
 
-class _NC {
-  static const primary = AppDesignSystem.primary;
-  static const bg = AppDesignSystem.backgroundOffWhite;
-  static const text = AppDesignSystem.textPrimary;
-  static const textSub = AppDesignSystem.textSecondary;
-}
-
 class BlockedScreen extends ConsumerWidget {
   const BlockedScreen({super.key});
+
+  static const _bg = Color(0xFF121212);
+  static const _text = Colors.white;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Directionality(
       textDirection: TextDirection.ltr,
       child: Scaffold(
-        backgroundColor: _NC.bg,
+        backgroundColor: _bg,
         body: SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -36,21 +32,21 @@ class BlockedScreen extends ConsumerWidget {
                   width: 100,
                   height: 100,
                   decoration: BoxDecoration(
-                    color: AppDesignSystem.errorRed.withValues(alpha: 0.15),
+                    color: Colors.white.withValues(alpha: 0.08),
                     shape: BoxShape.circle,
                   ),
                   child: const Icon(Icons.block_rounded, size: 48, color: AppDesignSystem.errorRed),
                 ),
                 const SizedBox(height: 24),
                 const Text(
-                  'You are blocked',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: _NC.text),
+                  'Account Blocked',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: _text),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  'Your cook account is blocked. Please contact support if you believe this is a mistake.',
-                  style: TextStyle(fontSize: 15, color: _NC.textSub, height: 1.5),
+                Text(
+                  'Your cook account has been blocked. Please contact support if you believe this is a mistake.',
+                  style: TextStyle(fontSize: 15, color: Colors.white.withValues(alpha: 0.72), height: 1.5),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 32),
@@ -62,11 +58,12 @@ class BlockedScreen extends ConsumerWidget {
                       if (context.mounted) context.go(RouteNames.login);
                     },
                     style: FilledButton.styleFrom(
-                      backgroundColor: _NC.primary,
+                      backgroundColor: AppDesignSystem.primary,
+                      foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     ),
-                    child: const Text('Sign out'),
+                    child: const Text('Logout'),
                   ),
                 ),
               ],

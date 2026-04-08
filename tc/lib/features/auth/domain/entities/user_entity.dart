@@ -3,8 +3,15 @@ import 'package:equatable/equatable.dart';
 /// User role in the marketplace.
 enum AppRole { chef, customer, admin }
 
-/// Chef application status. Only relevant when role is chef.
+/// Legacy display enum; routing uses [ChefAccessLevel] from Supabase.
 enum ChefApprovalStatus { pending, approved, rejected }
+
+/// Chef shell / marketplace access (from [chef_profiles.access_level] — server authority).
+enum ChefAccessLevel {
+  partialAccess,
+  fullAccess,
+  blockedAccess,
+}
 
 class UserEntity extends Equatable {
   final String id;
@@ -14,9 +21,10 @@ class UserEntity extends Equatable {
   final String? profileImageUrl;
   final bool isVerified;
   final AppRole? role;
-  /// For chefs: pending until review, then approved or rejected.
+  /// Server-driven access level for chefs (replaces ad-hoc [ChefApprovalStatus] for routing).
+  final ChefAccessLevel? chefAccessLevel;
+  /// Legacy / display; prefer [chefAccessLevel] for gates.
   final ChefApprovalStatus? chefApprovalStatus;
-  /// Shown on rejection screen when chefApprovalStatus == rejected.
   final String? rejectionReason;
   final bool isBlocked;
 
@@ -28,6 +36,7 @@ class UserEntity extends Equatable {
     this.profileImageUrl,
     this.isVerified = false,
     this.role,
+    this.chefAccessLevel,
     this.chefApprovalStatus,
     this.rejectionReason,
     this.isBlocked = false,
@@ -36,12 +45,27 @@ class UserEntity extends Equatable {
   bool get isChef => role == AppRole.chef;
   bool get isCustomer => role == AppRole.customer;
   bool get isAdmin => role == AppRole.admin;
-  bool get isChefApproved => role == AppRole.chef && chefApprovalStatus == ChefApprovalStatus.approved;
-  bool get isChefRejected => role == AppRole.chef && chefApprovalStatus == ChefApprovalStatus.rejected;
-  /// Pending review, or unknown/null status (treat as not approved yet).
+
+  bool get isChefFullAccess =>
+      role == AppRole.chef && chefAccessLevel == ChefAccessLevel.fullAccess;
+
+  bool get isChefPartialAccess =>
+      role == AppRole.chef && chefAccessLevel == ChefAccessLevel.partialAccess;
+
+  bool get isChefBlockedAccess =>
+      role == AppRole.chef && chefAccessLevel == ChefAccessLevel.blockedAccess;
+
+  /// Legacy: pending in the old enum sense (partial shell).
   bool get isChefPending =>
       role == AppRole.chef &&
       (chefApprovalStatus == null || chefApprovalStatus == ChefApprovalStatus.pending);
+
+  /// Deprecated for document review — use [isChefBlockedAccess] / moderation flags.
+  bool get isChefApproved =>
+      role == AppRole.chef && chefApprovalStatus == ChefApprovalStatus.approved;
+
+  bool get isChefRejected =>
+      role == AppRole.chef && chefApprovalStatus == ChefApprovalStatus.rejected;
 
   @override
   List<Object?> get props => [
@@ -52,6 +76,7 @@ class UserEntity extends Equatable {
         profileImageUrl,
         isVerified,
         role,
+        chefAccessLevel,
         chefApprovalStatus,
         rejectionReason,
         isBlocked,

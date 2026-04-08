@@ -468,6 +468,7 @@ class OrdersMockRemoteDataSource implements OrdersRemoteDataSource {
     required String chefName,
     required List<Map<String, dynamic>> items,
     required double totalAmount,
+    double commissionAmount = 0,
     String? deliveryAddress,
     String? notes,
     String? idempotencyKey,

@@ -451,11 +451,18 @@ CREATE POLICY notifications_select_recipient
     OR (public.auth_is_active_user () AND customer_id = auth.uid ())
   );
 
-CREATE POLICY notifications_insert_system
+-- Inserts: admins may target any recipient (system / support). Everyone else must only
+-- insert rows where recipient_id (customer_id) is themselves — prevents spoofing.
+CREATE POLICY notifications_insert_admin
+  ON public.notifications FOR INSERT
+  WITH CHECK (public.is_admin ());
+
+CREATE POLICY notifications_insert_own_recipient
   ON public.notifications FOR INSERT
   WITH CHECK (
     public.auth_is_active_user ()
-    AND (public.is_admin () OR public.auth_role () IN ('chef', 'customer'))
+    AND NOT public.is_admin ()
+    AND customer_id = auth.uid ()
   );
 
 CREATE POLICY notifications_update_recipient

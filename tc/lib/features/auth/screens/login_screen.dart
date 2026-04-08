@@ -2,11 +2,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/constants/route_names.dart';
 import '../../../core/theme/app_design_system.dart';
 import '../../../core/theme/naham_theme.dart';
 import '../../../core/utils/extensions.dart';
+import '../../../core/utils/supabase_error_message.dart';
 import '../../../core/widgets/snackbar_helper.dart';
 import '../domain/entities/user_entity.dart';
 import '../presentation/providers/auth_provider.dart';
@@ -42,31 +44,67 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       await ref.read(authStateProvider.notifier).login(
             _emailController.text.trim(),
             _passwordController.text,
+            ref.read(selectedRoleProvider),
           );
 
       if (!mounted) return;
       final user = ref.read(authStateProvider).valueOrNull;
-      if (user == null || user.role == null) {
-        SnackbarHelper.error(context, 'Sign in failed. Please try again.');
+      if (user == null) {
+        debugPrint('[AUTH] login UI: user null after successful login call');
+        SnackbarHelper.error(
+          context,
+          'Could not load your account after sign-in. Try again.',
+        );
+        return;
+      }
+      if (user.role == null) {
+        debugPrint('[AUTH] login UI: role null uid=${user.id}');
+        SnackbarHelper.error(
+          context,
+          'Your profile has no role. Contact support or try signing in again.',
+        );
         return;
       }
 
-      // Stabilizes cook orders/chat providers if profile.role lags after auth refresh.
+      // Stabilizes role-scoped providers if profile.role lags after auth refresh.
       if (user.isChef) {
         ref.read(selectedRoleProvider.notifier).state = AppRole.chef;
       } else if (user.isCustomer) {
         ref.read(selectedRoleProvider.notifier).state = AppRole.customer;
+      } else if (user.isAdmin) {
+        ref.read(selectedRoleProvider.notifier).state = AppRole.admin;
       }
 
+      debugPrint('[ROUTER] login ok role=${user.role} -> splash');
       // Route through splash so GoRouter redirect remains the single source of truth.
       context.go(RouteNames.splash);
-    } catch (e) {
-      debugPrint('[Login] Error: $e');
+    } catch (e, st) {
+      debugPrint('[Login] RAW ERROR TYPE: ${e.runtimeType}');
+      debugPrint('[Login] RAW ERROR MESSAGE: ${_loginDebugErrorLine(e)}');
+      debugPrint('[Login] STACK: $st');
       if (mounted) {
-        final msg = e.toString().replaceAll('Exception: ', '').trim();
-        SnackbarHelper.error(context, msg.isNotEmpty ? msg : 'Sign in failed.');
+        final msg = kDebugMode
+            ? _loginDebugSnackBarText(e)
+            : userFriendlyErrorMessage(e, fallback: 'Sign in failed.');
+        SnackbarHelper.error(context, msg);
       }
     }
+  }
+
+  /// Debug-only: full server fields, not a wrapped [Exception] string.
+  String _loginDebugErrorLine(Object e) {
+    if (e is AuthException) {
+      return 'AuthException statusCode=${e.statusCode} message=${e.message}';
+    }
+    if (e is PostgrestException) {
+      return 'PostgrestException code=${e.code} message=${e.message} details=${e.details} hint=${e.hint}';
+    }
+    return e.toString();
+  }
+
+  String _loginDebugSnackBarText(Object e) {
+    final line = _loginDebugErrorLine(e);
+    return '$line\n(Full stack in console.)';
   }
 
   @override

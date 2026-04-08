@@ -3,11 +3,15 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../core/menu/naham_menu_categories.dart';
 import '../../../../core/supabase/supabase_config.dart';
+import '../../../../core/validation/naham_input_formatters.dart';
+import '../../../../core/validation/naham_validators.dart';
 import '../../../../core/theme/app_design_system.dart';
 import '../../../../services/ai_service.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
@@ -67,16 +71,6 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
   final _seasonsDataSource = SeasonsSupabaseDataSource();
   List<SeasonModel> _seasons = const [];
 
-  static const _categoryValues = [
-    'Northern',
-    'Southern',
-    'Eastern',
-    'Western',
-    'Najdi',
-    'Sweets',
-    'Other',
-  ];
-
   static const _steps = [
     'Calculating ingredient costs...',
     'Adding spices estimate (3%)...',
@@ -94,10 +88,9 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
     if (existing != null) {
       _nameCtrl.text = existing.name;
       _descriptionCtrl.text = existing.description;
-      _category = existing.categories.isNotEmpty &&
-              _categoryValues.contains(existing.categories.first)
-          ? existing.categories.first
-          : 'Najdi';
+      _category = NahamMenuCategories.normalizeDishCategory(
+        existing.categories.isNotEmpty ? existing.categories.first : null,
+      );
       _imageUrl = existing.imageUrl;
       _manualPriceCtrl.text = existing.price.toStringAsFixed(2);
       _pricingMode = _PricingMode.manual;
@@ -176,11 +169,11 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
                       const SizedBox(height: 8),
                       TextFormField(
                         controller: _nameCtrl,
+                        textCapitalization: TextCapitalization.words,
                         decoration: const InputDecoration(
                           labelText: 'Dish name',
                         ),
-                        validator: (v) =>
-                            (v == null || v.trim().isEmpty) ? 'Please enter a name' : null,
+                        validator: NahamValidators.personOrDishName,
                       ),
                       const SizedBox(height: 8),
                       TextFormField(
@@ -189,19 +182,19 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
                           labelText: 'Description',
                         ),
                         maxLines: 2,
+                        validator: NahamValidators.optionalDescription,
                       ),
                       const SizedBox(height: 8),
                       DropdownButtonFormField<String>(
                         value: _category,
-                        items: const [
-                          DropdownMenuItem(value: 'Northern', child: Text('Northern')),
-                          DropdownMenuItem(value: 'Southern', child: Text('Southern')),
-                          DropdownMenuItem(value: 'Eastern', child: Text('Eastern')),
-                          DropdownMenuItem(value: 'Western', child: Text('Western')),
-                          DropdownMenuItem(value: 'Najdi', child: Text('Najdi')),
-                          DropdownMenuItem(value: 'Sweets', child: Text('Sweets')),
-                          DropdownMenuItem(value: 'Other', child: Text('Other')),
-                        ],
+                        items: NahamMenuCategories.dishCategoryIds
+                            .map(
+                              (id) => DropdownMenuItem<String>(
+                                value: id,
+                                child: Text(id),
+                              ),
+                            )
+                            .toList(),
                         onChanged: (v) {
                           if (v != null) {
                             setState(() => _category = v);
@@ -378,7 +371,9 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
           decoration: const InputDecoration(
             labelText: 'Price (SAR)',
           ),
-          keyboardType: TextInputType.number,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          inputFormatters: [NahamInputFormatters.decimalNumber],
+          validator: NahamValidators.pricePositive,
         ),
         const SizedBox(height: 12),
         SizedBox(
@@ -386,9 +381,14 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
           child: FilledButton(
             onPressed: () async {
               if (!_validateBasicInfo()) return;
-              final v = double.tryParse(_manualPriceCtrl.text.trim());
-              if (v == null || v <= 0) {
-                setState(() => _error = 'Please enter a valid price.');
+              final priceErr = NahamValidators.pricePositive(_manualPriceCtrl.text);
+              if (priceErr != null) {
+                setState(() => _error = priceErr);
+                return;
+              }
+              final v = double.tryParse(_manualPriceCtrl.text.trim().replaceAll(',', '.'));
+              if (v == null) {
+                setState(() => _error = 'Enter a valid price');
                 return;
               }
               await _saveWithPrice(v);
@@ -420,6 +420,8 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
                 'We\'ll divide the total cost by this number to get cost per serving',
           ),
           keyboardType: TextInputType.number,
+          inputFormatters: [NahamInputFormatters.unsignedInt],
+          validator: NahamValidators.positiveInt,
         ),
         const SizedBox(height: 16),
         const Text(
@@ -451,10 +453,19 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
         const SizedBox(height: 10),
         TextFormField(
           controller: _profitCtrl,
-          keyboardType: TextInputType.number,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          inputFormatters: [NahamInputFormatters.decimalNumber],
           decoration: InputDecoration(
             labelText: _profitIsPercent ? 'Profit (%)' : 'Profit (SAR)',
           ),
+          validator: (v) {
+            final t = v?.trim() ?? '';
+            if (t.isEmpty) return 'Required';
+            final n = double.tryParse(t.replaceAll(',', '.'));
+            if (n == null || n < 0) return 'Invalid value';
+            if (_profitIsPercent && n > 100) return 'Max 100%';
+            return null;
+          },
         ),
         const SizedBox(height: 12),
         SizedBox(
@@ -541,6 +552,7 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
           categories: [_category],
           isAvailable: existing.isAvailable,
           preparationTime: existing.preparationTime,
+          remainingQuantity: existing.remainingQuantity,
           createdAt: existing.createdAt,
           updatedAt: now,
           chefId: existing.chefId,
@@ -560,16 +572,22 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
           price: price,
           imageUrl: imageUrl,
           categories: [_category],
-          isAvailable: true,
-          preparationTime: 30,
+          isAvailable: false,
+          preparationTime: 0,
+          remainingQuantity: 0,
           createdAt: now,
           chefId: chefId,
         );
         await repo.createDish(entity);
         ref.invalidate(chefDishesStreamProvider);
         if (mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('Menu item added')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Menu item added. Turn it on and set portions in Menu when you are ready to sell.',
+              ),
+            ),
+          );
           Navigator.of(context).pop();
         }
       }
@@ -790,6 +808,7 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
   Future<void> _showManualPriceSheet(BuildContext context) async {
     final initial = _recommendedPrice > 0 ? _recommendedPrice.toStringAsFixed(2) : '';
     final controller = TextEditingController(text: initial);
+    final formKey = GlobalKey<FormState>();
 
     await showModalBottomSheet<void>(
       context: context,
@@ -805,47 +824,49 @@ class _AddMenuItemScreenState extends ConsumerState<AddMenuItemScreen> {
             top: 16,
             bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Set your own price',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 8),
-              TextFormField(
-                controller: controller,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Price (SAR)',
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Set your own price',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                 ),
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: () async {
-                    final v = double.tryParse(controller.text.trim());
-                    if (v == null || v <= 0) {
-                      ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(
-                          content: Text('Enter a valid price.'),
-                        ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: controller,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [NahamInputFormatters.decimalNumber],
+                  decoration: const InputDecoration(
+                    labelText: 'Price (SAR)',
+                  ),
+                  validator: NahamValidators.pricePositive,
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () async {
+                      if (formKey.currentState?.validate() != true) return;
+                      final v = double.tryParse(
+                        controller.text.trim().replaceAll(',', '.'),
                       );
-                      return;
-                    }
-                    Navigator.of(ctx).pop();
-                    await _saveWithPrice(v);
-                  },
-                  child: const Text('Save price'),
+                      if (v == null) return;
+                      Navigator.of(ctx).pop();
+                      await _saveWithPrice(v);
+                    },
+                    child: const Text('Save price'),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         );
       },
     );
+    controller.dispose();
   }
 
   Widget _resultRow(String label, double value, {bool bold = false, String? trailingLabel}) {
@@ -1108,6 +1129,7 @@ class _AiPricingResultScreen extends StatefulWidget {
 class _AiPricingResultScreenState extends State<_AiPricingResultScreen> {
   bool _showCustom = false;
   final TextEditingController _customCtrl = TextEditingController();
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
 
   @override
   void initState() {
@@ -1154,9 +1176,11 @@ class _AiPricingResultScreenState extends State<_AiPricingResultScreen> {
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
             if (warningNeeded)
               Container(
                 width: double.infinity,
@@ -1193,9 +1217,11 @@ class _AiPricingResultScreenState extends State<_AiPricingResultScreen> {
                 controller: _customCtrl,
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: [NahamInputFormatters.decimalNumber],
                 decoration: const InputDecoration(
                   labelText: 'Your price (SAR)',
                 ),
+                validator: NahamValidators.pricePositive,
               ),
             const SizedBox(height: 12),
             Row(
@@ -1227,15 +1253,11 @@ class _AiPricingResultScreenState extends State<_AiPricingResultScreen> {
                 width: double.infinity,
                 child: FilledButton(
                   onPressed: () async {
-                    final v = double.tryParse(_customCtrl.text.trim());
-                    if (v == null || v <= 0) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Enter a valid price.'),
-                        ),
-                      );
-                      return;
-                    }
+                    if (_formKey.currentState?.validate() != true) return;
+                    final v = double.tryParse(
+                      _customCtrl.text.trim().replaceAll(',', '.'),
+                    );
+                    if (v == null) return;
                     await widget.onApply(v);
                   },
                   child: const Text('Save my price'),
@@ -1243,6 +1265,7 @@ class _AiPricingResultScreenState extends State<_AiPricingResultScreen> {
               ),
             ],
           ],
+        ),
         ),
       ),
     );
@@ -1326,6 +1349,7 @@ class _IngredientRow extends StatelessWidget {
                 labelText: 'Name',
                 hintText: 'e.g. Chicken',
               ),
+              validator: NahamValidators.requiredText,
             ),
           ),
           const SizedBox(width: 8),
@@ -1337,7 +1361,12 @@ class _IngredientRow extends StatelessWidget {
                 labelText: 'Qty',
                 hintText: 'e.g. 2',
               ),
-              keyboardType: TextInputType.number,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: [NahamInputFormatters.decimalNumber],
+              validator: (v) => NahamValidators.pricePositive(
+                v,
+                message: 'Enter quantity greater than 0',
+              ),
             ),
           ),
           const SizedBox(width: 8),
@@ -1372,7 +1401,9 @@ class _IngredientRow extends StatelessWidget {
                 labelText: 'Price',
                 hintText: 'e.g. 25 SAR',
               ),
-              keyboardType: TextInputType.number,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: [NahamInputFormatters.decimalNumber],
+              validator: NahamValidators.nonNegativeDecimal,
             ),
           ),
           const SizedBox(width: 4),

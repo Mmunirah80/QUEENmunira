@@ -2,11 +2,14 @@
 // Single reel page for vertical feed — video_player, play when [isActive]. RTL, TC theme.
 // ============================================================
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
+import 'package:naham_cook_app/features/auth/presentation/providers/auth_provider.dart';
 import 'package:naham_cook_app/features/reels/domain/entities/reel_entity.dart';
 import 'package:naham_cook_app/features/reels/presentation/providers/reels_provider.dart';
 
@@ -18,6 +21,8 @@ class ReelVideoPage extends ConsumerStatefulWidget {
   final VoidCallback? onDelete;
   /// Customer flow: add featured dish to cart (shown when [ReelEntity.dishId] is set).
   final void Function(BuildContext context, ReelEntity reel)? onOrderDish;
+  /// When true, ordering is disabled (e.g. [ReelEntity.chefOrderingDisabled] or chef profile override).
+  final bool orderingDisabled;
 
   const ReelVideoPage({
     super.key,
@@ -26,6 +31,7 @@ class ReelVideoPage extends ConsumerStatefulWidget {
     this.onTapChef,
     this.onDelete,
     this.onOrderDish,
+    this.orderingDisabled = false,
   });
 
   @override
@@ -34,8 +40,10 @@ class ReelVideoPage extends ConsumerStatefulWidget {
 
 class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
   VideoPlayerController? _controller;
+  Timer? _loadTimeout;
   bool _liked = false;
   int _likesCount = 0;
+  bool _likeBusy = false;
   bool _initFailed = false;
 
   @override
@@ -49,13 +57,22 @@ class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
     } else {
       final c = VideoPlayerController.networkUrl(Uri.parse(url));
       _controller = c;
+      _loadTimeout = Timer(const Duration(seconds: 15), () {
+        if (!mounted) return;
+        final ctrl = _controller;
+        if (ctrl != null && !ctrl.value.isInitialized && !_initFailed) {
+          setState(() => _initFailed = true);
+        }
+      });
       c.initialize().then((_) {
+        _loadTimeout?.cancel();
         if (mounted) {
           setState(() {});
           c.setLooping(true);
           if (widget.isActive) c.play();
         }
       }).catchError((Object _) {
+        _loadTimeout?.cancel();
         if (mounted) setState(() => _initFailed = true);
       });
     }
@@ -64,6 +81,15 @@ class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
   @override
   void didUpdateWidget(ReelVideoPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.reel.id == oldWidget.reel.id) {
+      if (!_likeBusy) {
+        _liked = widget.reel.isLiked;
+        _likesCount = widget.reel.likesCount;
+      }
+    } else {
+      _liked = widget.reel.isLiked;
+      _likesCount = widget.reel.likesCount;
+    }
     final c = _controller;
     if (c == null || _initFailed || !c.value.isInitialized) return;
     if (widget.isActive && !c.value.isPlaying) {
@@ -75,18 +101,50 @@ class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
 
   @override
   void dispose() {
+    _loadTimeout?.cancel();
     _controller?.dispose();
     super.dispose();
   }
 
   Future<void> _toggleLike() async {
+    final uid = ref.read(authStateProvider).valueOrNull?.id ?? '';
+    if (uid.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sign in to like reels')),
+      );
+      return;
+    }
+    if (_likeBusy) return;
     final repo = ref.read(reelsRepositoryProvider);
-    if (_liked) {
-      await repo.unlikeReel(widget.reel.id);
-      if (mounted) setState(() { _liked = false; _likesCount = (_likesCount - 1).clamp(0, 1 << 30); });
-    } else {
-      await repo.likeReel(widget.reel.id);
-      if (mounted) setState(() { _liked = true; _likesCount++; });
+    setState(() => _likeBusy = true);
+    try {
+      if (_liked) {
+        await repo.unlikeReel(widget.reel.id);
+        if (mounted) {
+          setState(() {
+            _liked = false;
+            _likesCount = (_likesCount - 1).clamp(0, 1 << 30);
+          });
+        }
+      } else {
+        await repo.likeReel(widget.reel.id);
+        if (mounted) {
+          setState(() {
+            _liked = true;
+            _likesCount++;
+          });
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _liked = widget.reel.isLiked;
+          _likesCount = widget.reel.likesCount;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _likeBusy = false);
     }
   }
 
@@ -100,6 +158,7 @@ class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
     final showOrder = widget.reel.dishId != null &&
         widget.reel.dishId!.isNotEmpty &&
         widget.onOrderDish != null;
+    final orderBlocked = widget.orderingDisabled || widget.reel.chefOrderingDisabled;
 
     return Stack(
       fit: StackFit.expand,
@@ -126,7 +185,7 @@ class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
                   Text(
                     widget.reel.videoUrl.trim().isEmpty
                         ? 'Video unavailable'
-                        : 'Could not load video',
+                        : 'Failed to load reel',
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Colors.white70),
                   ),
@@ -222,7 +281,7 @@ class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ],
-              if (showOrder) ...[
+              if (showOrder && !orderBlocked) ...[
                 const SizedBox(height: 12),
                 FilledButton.icon(
                   onPressed: () => widget.onOrderDish!(context, widget.reel),
@@ -237,6 +296,17 @@ class _ReelVideoPageState extends ConsumerState<ReelVideoPage> {
                         : 'Add dish to cart',
                     style: const TextStyle(fontWeight: FontWeight.w600),
                     overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+              if (showOrder && orderBlocked) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Temporarily unavailable',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.85),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
                   ),
                 ),
               ],

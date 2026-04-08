@@ -1,4 +1,7 @@
 -- ============================================================
+-- SUPERSEDED by `supabase_chef_access_documents_v3.sql` (access_level, pending_review,
+-- one row per document type, no simulation). Keep this file for historical diff only.
+-- ============================================================
 -- NAHAM — Single pipeline for chef document approve / reject
 -- Admin app + cook simulation both call this RPC (no duplicate Dart logic).
 --
@@ -17,6 +20,26 @@
 -- Align with Flutter inserts
 ALTER TABLE public.messages
   ADD COLUMN IF NOT EXISTS is_read boolean NOT NULL DEFAULT false;
+
+-- Dedupe in-app admin_document rows when apply_chef_document_review is retried (double-submit).
+ALTER TABLE public.notifications
+  ADD COLUMN IF NOT EXISTS chef_document_id uuid;
+
+COMMENT ON COLUMN public.notifications.chef_document_id IS
+  'Source chef_documents.id for admin_document notifications; prevents duplicate rows per review.';
+
+-- First full compliance approval; renewal review keeps approval_status=approved + full app access.
+ALTER TABLE public.chef_profiles
+  ADD COLUMN IF NOT EXISTS initial_approval_at timestamptz;
+
+COMMENT ON COLUMN public.chef_profiles.initial_approval_at IS
+  'Set once when all required documents are approved; distinguishes new-chef waiting (partial shell) from renewal review (full access).';
+
+-- Existing approved kitchens: treat as already onboarded so renewals do not lock the shell.
+UPDATE public.chef_profiles cp
+SET initial_approval_at = now()
+WHERE cp.approval_status = 'approved'
+  AND cp.initial_approval_at IS NULL;
 
 -- Staging toggle for chef self-service simulation (see chef_document_review_simulation_enabled)
 CREATE TABLE IF NOT EXISTS public.dev_feature_flags (
@@ -47,7 +70,7 @@ $$;
 REVOKE ALL ON FUNCTION public.chef_document_review_simulation_enabled () FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.chef_document_review_simulation_enabled () TO authenticated;
 
--- Mirrors lib/features/cook/data/chef_documents_compliance.dart (national_id + freelancer_id).
+-- Canonical two slots: id_document + health_or_kitchen_document (see supabase_chef_documents_two_types_migration_v1.sql).
 CREATE OR REPLACE FUNCTION public._chef_type_allows_ops (p_chef_id uuid, p_doc_type text)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -100,8 +123,8 @@ LANGUAGE sql
 STABLE
 SET search_path = public
 AS $$
-  SELECT public._chef_type_allows_ops (p_chef_id, 'national_id')
-    AND public._chef_type_allows_ops (p_chef_id, 'freelancer_id');
+  SELECT public._chef_type_allows_ops (p_chef_id, 'id_document')
+    AND public._chef_type_allows_ops (p_chef_id, 'health_or_kitchen_document');
 $$;
 
 CREATE OR REPLACE FUNCTION public.apply_chef_document_review (
@@ -120,13 +143,16 @@ DECLARE
   v_status text := lower(trim(p_status));
   v_reason text;
   v_reason_text text;
-  v_body_approve constant text := 'تم قبول المستند. يمكنك متابعة استخدام التطبيق.';
+  v_body_approve constant text := 'Your document was approved. Thank you.';
   v_msg text;
   v_conv_id uuid;
   v_reviewer uuid;
   v_msg_sender uuid;
   v_now timestamptz := now();
   v_doc_status text;
+  v_old_initial timestamptz;
+  v_new_initial timestamptz;
+  v_send_activation boolean := false;
 BEGIN
   IF v_actor IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
@@ -145,19 +171,28 @@ BEGIN
     RAISE EXCEPTION 'Document not found';
   END IF;
 
+  SELECT initial_approval_at
+  INTO v_old_initial
+  FROM public.chef_profiles
+  WHERE id = v_chef_id;
+
   IF public.is_admin (v_actor) THEN
     v_reviewer := v_actor;
   ELSIF v_chef_id = v_actor AND public.chef_document_review_simulation_enabled () THEN
     IF v_doc_status IS DISTINCT FROM 'pending' THEN
       RAISE EXCEPTION 'Simulation only allowed on pending documents';
     END IF;
+    -- Dev-only: no admin JWT on this call; pick a stable admin row (not a hardcoded id).
     SELECT p.id
     INTO v_reviewer
     FROM public.profiles p
     WHERE lower(trim(p.role::text)) = 'admin'
       AND (p.is_blocked IS NULL OR p.is_blocked = false)
-    ORDER BY p.id
+    ORDER BY p.created_at ASC NULLS LAST, p.id ASC
     LIMIT 1;
+    IF v_reviewer IS NULL THEN
+      RAISE EXCEPTION 'Chef document simulation requires at least one admin profile in public.profiles';
+    END IF;
   ELSE
     RAISE EXCEPTION 'Forbidden';
   END IF;
@@ -165,7 +200,12 @@ BEGIN
   IF v_status = 'rejected' THEN
     v_reason := nullif(trim(coalesce(p_rejection_reason, '')), '');
     IF v_reason IS NULL THEN
+      IF public.is_admin (v_actor) THEN
+        RAISE EXCEPTION 'Rejection reason is required';
+      END IF;
       v_reason := 'Rejected';
+    ELSIF public.is_admin (v_actor) AND char_length(v_reason) < 5 THEN
+      RAISE EXCEPTION 'Rejection reason must be at least 5 characters';
     END IF;
     v_reason_text := v_reason;
   END IF;
@@ -183,31 +223,51 @@ BEGIN
   WHERE id = p_document_id;
 
   IF v_status = 'rejected' THEN
-    UPDATE public.chef_profiles
-    SET
-      suspended = true,
-      suspension_reason = v_reason_text
-    WHERE id = v_chef_id;
+    IF EXISTS (
+      SELECT 1
+      FROM public.chef_profiles cp
+      WHERE cp.id = v_chef_id
+        AND cp.initial_approval_at IS NOT NULL
+    ) THEN
+      -- Established chef: operational pause; shell uses suspended + approved UserEntity.
+      UPDATE public.chef_profiles
+      SET
+        suspended = true,
+        suspension_reason = v_reason_text
+      WHERE id = v_chef_id;
+    ELSE
+      -- New chef: account-level rejection (partial shell + rejection_reason).
+      UPDATE public.chef_profiles
+      SET
+        approval_status = 'rejected',
+        rejection_reason = v_reason_text,
+        suspended = false,
+        suspension_reason = NULL
+      WHERE id = v_chef_id;
+    END IF;
   ELSIF v_status = 'approved' THEN
-    -- chef_profiles fields used by the app:
-    -- • Router limitedShell uses UserEntity (approval_status, rejection_reason) + ChefDocModel (approval_status, suspended).
-    -- • Document reject sets suspended=true; we must clear that on ANY approve so re-approval / renewal is not stuck.
-    -- • Full unlock (Home/Orders/Menu/Reels) needs approval_status='approved' + compliance (national_id + freelancer_id).
     IF public._chef_compliance_can_receive_orders (v_chef_id) THEN
       UPDATE public.chef_profiles
       SET
         approval_status = 'approved',
         rejection_reason = NULL,
         suspended = false,
-        suspension_reason = NULL
+        suspension_reason = NULL,
+        initial_approval_at = coalesce(initial_approval_at, v_now)
       WHERE id = v_chef_id;
     ELSE
-      -- Partial approval: clear doc-review suspension (was only cleared inside compliance branch before).
-      -- If the account was fully rejected, move back to pending so UserEntity.isChefRejected is false after refresh.
       UPDATE public.chef_profiles
       SET
-        suspended = false,
-        suspension_reason = NULL,
+        suspended = CASE
+          WHEN public._chef_compliance_can_receive_orders (v_chef_id) THEN false
+          WHEN initial_approval_at IS NOT NULL THEN suspended
+          ELSE false
+        END,
+        suspension_reason = CASE
+          WHEN public._chef_compliance_can_receive_orders (v_chef_id) THEN NULL
+          WHEN initial_approval_at IS NOT NULL THEN suspension_reason
+          ELSE NULL
+        END,
         approval_status = CASE
           WHEN lower(trim(coalesce(approval_status, ''))) = 'rejected' THEN 'pending'
           ELSE approval_status
@@ -220,24 +280,71 @@ BEGIN
     END IF;
   END IF;
 
-  IF v_status = 'rejected' THEN
-    INSERT INTO public.notifications (customer_id, title, body, is_read, type)
-    VALUES (
-      v_chef_id,
-      'تم رفض مستند',
-      v_reason_text,
-      false,
-      'admin_document'
-    );
-  ELSE
-    INSERT INTO public.notifications (customer_id, title, body, is_read, type)
-    VALUES (
-      v_chef_id,
-      'تم قبول مستند',
-      v_body_approve,
-      false,
-      'admin_document'
-    );
+  SELECT initial_approval_at
+  INTO v_new_initial
+  FROM public.chef_profiles
+  WHERE id = v_chef_id;
+
+  v_send_activation :=
+    v_status = 'approved'
+    AND v_old_initial IS NULL
+    AND v_new_initial IS NOT NULL
+    AND public._chef_compliance_can_receive_orders (v_chef_id);
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.notifications n
+    WHERE n.customer_id = v_chef_id
+      AND n.type = 'admin_document'
+      AND n.chef_document_id = p_document_id
+  ) THEN
+    IF v_status = 'rejected' THEN
+      INSERT INTO public.notifications (customer_id, title, body, is_read, type, chef_document_id)
+      VALUES (
+        v_chef_id,
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM public.chef_profiles cp
+            WHERE cp.id = v_chef_id
+              AND cp.initial_approval_at IS NOT NULL
+          ) THEN 'Replacement document rejected'
+          ELSE 'Document rejected'
+        END,
+        v_reason_text,
+        false,
+        'admin_document',
+        p_document_id
+      );
+    ELSE
+      INSERT INTO public.notifications (customer_id, title, body, is_read, type, chef_document_id)
+      VALUES (
+        v_chef_id,
+        'Document approved',
+        v_body_approve,
+        false,
+        'admin_document',
+        p_document_id
+      );
+    END IF;
+  END IF;
+
+  IF v_send_activation THEN
+    IF NOT EXISTS (
+      SELECT 1
+      FROM public.notifications n
+      WHERE n.customer_id = v_chef_id
+        AND n.type = 'chef_account_activated'
+    ) THEN
+      INSERT INTO public.notifications (customer_id, title, body, is_read, type)
+      VALUES (
+        v_chef_id,
+        'Account activated',
+        'All required documents are approved. You now have full access to the cook app.',
+        false,
+        'chef_account_activated'
+      );
+    END IF;
   END IF;
 
   SELECT c.id
@@ -255,20 +362,31 @@ BEGIN
 
   IF v_status = 'rejected' THEN
     v_msg :=
-      'بخصوص مستنداتك: ' || v_reason_text || E'\n'
-      || 'الرجاء فتح البروفايل ← المستندات وإعادة رفع الملف الصحيح. شكراً لتفهمك — فريق نهام.' || E'\n'
-      || '—' || E'\n'
-      || 'Document update: ' || v_reason_text || E'\n'
+      'Rejection reason: ' || v_reason_text || E'\n\n'
       || 'Please open Profile → Documents and upload a corrected file. — Naham team';
   ELSE
     v_msg :=
-      'تم قبول المستند المرفوع. شكراً لك.' || E'\n'
-      || '—' || E'\n'
-      || 'Your uploaded document was approved. Thank you! — Naham';
+      'Your uploaded document was approved. Thank you.' || E'\n'
+      || '— Naham team';
   END IF;
 
   INSERT INTO public.messages (conversation_id, sender_id, content, is_read)
   VALUES (v_conv_id, v_msg_sender, v_msg, false);
+
+  IF v_send_activation THEN
+    INSERT INTO public.messages (conversation_id, sender_id, content, is_read)
+    SELECT
+      v_conv_id,
+      v_msg_sender,
+      'Your account is now fully activated. All required documents are approved. You can use Home, Orders, Menu, and Reels. Welcome to Naham.',
+      false
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM public.messages m
+      WHERE m.conversation_id = v_conv_id
+        AND m.content LIKE 'Your account is now fully activated.%'
+    );
+  END IF;
 END;
 $$;
 

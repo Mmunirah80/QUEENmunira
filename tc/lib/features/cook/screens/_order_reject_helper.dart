@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../../../core/supabase/supabase_config.dart';
 
 Future<String?> showRejectReasonSheet(BuildContext context) {
   return showModalBottomSheet<String>(
@@ -34,7 +35,7 @@ Future<String?> showRejectReasonSheet(BuildContext context) {
 @Deprecated('Server handles stock on reject/cancel via transition_order_status')
 Future<void> restoreRejectedOrderQuantities(String orderId) async {
   try {
-    final items = await Supabase.instance.client
+    final items = await SupabaseConfig.dataClient
         .from('order_items')
         .select('menu_item_id,quantity')
         .eq('order_id', orderId);
@@ -45,7 +46,7 @@ Future<void> restoreRejectedOrderQuantities(String orderId) async {
           ? (row['quantity'] as num).toInt()
           : int.tryParse('${row['quantity']}') ?? 0;
       if (menuItemId.isEmpty || quantity <= 0) continue;
-      await Supabase.instance.client.rpc<dynamic>(
+      await SupabaseConfig.dataClient.rpc<dynamic>(
         'increase_remaining_quantity',
         params: {
           'p_dish_id': menuItemId,

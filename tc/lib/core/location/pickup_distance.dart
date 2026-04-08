@@ -34,6 +34,235 @@ String formatPickupDistanceKm(double km) {
   return '${clamped.toStringAsFixed(1)} km';
 }
 
+/// Same as [formatPickupDistanceKm] but does not cap at [kMaxPickupRadiusKm] (for "whole city" browse).
+String formatDistanceKmNatural(double km) {
+  if (km.isNaN || km < 0) {
+    return '${kMinPickupDisplayKm.toStringAsFixed(1)} km';
+  }
+  final clamped = km < kMinPickupDisplayKm ? kMinPickupDisplayKm : km;
+  return '${clamped.toStringAsFixed(1)} km';
+}
+
+/// Straight-line distance for chef cards / lists (e.g. "3.2 km away").
+String formatDistanceKmAway(double km) => '${formatDistanceKmNatural(km)} away';
+
+int _compareKitchenName(ChefDocModel a, ChefDocModel b) {
+  final na = (a.kitchenName ?? '').toLowerCase();
+  final nb = (b.kitchenName ?? '').toLowerCase();
+  return na.compareTo(nb);
+}
+
+String normalizeKitchenCityKey(String? s) => (s ?? '').trim().toLowerCase();
+
+/// Maps geocode / DB city strings to a comparable key (matches [chef_profiles.kitchen_city] variants).
+String normalizeSaudiCityKey(String? s) {
+  final t = normalizeKitchenCityKey(s);
+  if (t.isEmpty) return '';
+  if (t.contains('riyadh')) return 'riyadh';
+  if (t.contains('jeddah') || t.contains('jiddah')) return 'jeddah';
+  if (t.contains('dammam')) return 'dammam';
+  if (t.contains('makkah') || t.contains('mecca')) return 'makkah';
+  if (t.contains('madinah') || t.contains('medina')) return 'madinah';
+  if (t.contains('khobar') || t.contains('al khobar')) return 'khobar';
+  return t;
+}
+
+/// Cooks in the same city as [userCity] ([chef_profiles.kitchen_city]), sorted by distance from pickup when coords exist.
+List<ChefWithPickupDistance> buildCityScopeChefs(
+  List<ChefDocModel> chefs,
+  String? userCity,
+  double customerLat,
+  double customerLng,
+) {
+  final target = normalizeSaudiCityKey(userCity);
+  if (target.isEmpty) return [];
+  final withDist = <ChefWithPickupDistance>[];
+  final noCoord = <ChefWithPickupDistance>[];
+  for (final c in chefs) {
+    if (!c.storefrontEvaluation.isAcceptingOrders) continue;
+    final kc = normalizeSaudiCityKey(c.kitchenCity);
+    if (kc.isEmpty || kc != target) continue;
+    final lat = c.kitchenLatitude;
+    final lng = c.kitchenLongitude;
+    if (lat != null && lng != null) {
+      final d = haversineKm(customerLat, customerLng, lat, lng);
+      withDist.add(ChefWithPickupDistance(c, d));
+    } else {
+      noCoord.add(ChefWithPickupDistance(c, null));
+    }
+  }
+  withDist.sort((a, b) => a.distanceKm!.compareTo(b.distanceKm!));
+  noCoord.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+  return [...withDist, ...noCoord];
+}
+
+/// Home browse: prefer kitchens in the same city as the pickup pin (reverse-geocode), nearest first.
+/// If no city could be resolved or no chefs match that city, falls back to [kMaxPickupRadiusKm] radius sort.
+List<ChefWithPickupDistance> buildHomeSortedChefs(
+  List<ChefDocModel> chefs,
+  double customerLat,
+  double customerLng,
+  String? pickupLocalityCity,
+) {
+  final cityKey = normalizeSaudiCityKey(pickupLocalityCity);
+  if (cityKey.isNotEmpty) {
+    final byCity = buildCityScopeChefs(chefs, pickupLocalityCity, customerLat, customerLng);
+    if (byCity.isNotEmpty) return byCity;
+  }
+  return buildPickupSortedChefs(
+    chefs,
+    customerLat,
+    customerLng,
+    pickupLocalityCity: pickupLocalityCity,
+  );
+}
+
+/// Same visibility rules as [buildHomeSortedChefs] for a single chef (cross-checks).
+///
+/// [pickupLocalityCity] must come from the customer’s pickup pin (e.g. reverse-geocode
+/// [CustomerPickupOrigin.localityCity]), **not** from `profiles.city`.
+bool chefVisibleForCustomerHome(
+  ChefDocModel chef,
+  double customerLat,
+  double customerLng,
+  String? pickupLocalityCity,
+) {
+  return buildHomeSortedChefs([chef], customerLat, customerLng, pickupLocalityCity).isNotEmpty;
+}
+
+/// Same as [chefVisibleForCustomerHome] — used by Reels so they share **exactly** the same scope as Home.
+bool chefVisibleForHomeAndReels(
+  ChefDocModel chef,
+  double customerLat,
+  double customerLng,
+  String? pickupLocalityCity,
+) =>
+    chefVisibleForCustomerHome(chef, customerLat, customerLng, pickupLocalityCity);
+
+// ─── Customer reels feed (region + chef standing; NOT storefront hours/online) ───
+
+/// Public reels: approved, not suspended, not in an active freeze (matches DB guard on reels SELECT).
+bool chefReelAccountEligibleForPublicFeed(ChefDocModel chef) {
+  if (chef.suspended) return false;
+  if ((chef.approvalStatus ?? '').toLowerCase().trim() != 'approved') return false;
+  if (chef.isFreezeActive) return false;
+  return true;
+}
+
+/// Same city / radius rules as [buildHomeSortedChefs] but **without** [ChefStorefrontEvaluation.isAcceptingOrders]
+/// (reels follow kitchen location even when the storefront is closed).
+List<ChefWithPickupDistance> buildCityScopeChefsForReels(
+  List<ChefDocModel> chefs,
+  String? userCity,
+  double customerLat,
+  double customerLng,
+) {
+  final target = normalizeSaudiCityKey(userCity);
+  if (target.isEmpty) return [];
+  final withDist = <ChefWithPickupDistance>[];
+  final noCoord = <ChefWithPickupDistance>[];
+  for (final c in chefs) {
+    final kc = normalizeSaudiCityKey(c.kitchenCity);
+    if (kc.isEmpty || kc != target) continue;
+    final lat = c.kitchenLatitude;
+    final lng = c.kitchenLongitude;
+    if (lat != null && lng != null) {
+      final d = haversineKm(customerLat, customerLng, lat, lng);
+      withDist.add(ChefWithPickupDistance(c, d));
+    } else {
+      noCoord.add(ChefWithPickupDistance(c, null));
+    }
+  }
+  withDist.sort((a, b) => a.distanceKm!.compareTo(b.distanceKm!));
+  noCoord.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+  return [...withDist, ...noCoord];
+}
+
+/// Pickup-radius + no-coord ordering for reels (no storefront / online filter).
+List<ChefWithPickupDistance> buildPickupSortedChefsForReels(
+  List<ChefDocModel> chefs,
+  double customerLat,
+  double customerLng, {
+  String? pickupLocalityCity,
+}) {
+  final cityKey = normalizeSaudiCityKey(pickupLocalityCity);
+  final within = <ChefWithPickupDistance>[];
+  final noCoord = <ChefWithPickupDistance>[];
+  for (final c in chefs) {
+    final lat = c.kitchenLatitude;
+    final lng = c.kitchenLongitude;
+    if (lat != null && lng != null) {
+      final d = haversineKm(customerLat, customerLng, lat, lng);
+      if (d <= kMaxPickupRadiusKm) {
+        within.add(ChefWithPickupDistance(c, d));
+      }
+    } else {
+      noCoord.add(ChefWithPickupDistance(c, null));
+    }
+  }
+  within.sort((a, b) => a.distanceKm!.compareTo(b.distanceKm!));
+
+  if (cityKey.isEmpty) {
+    noCoord.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+    return [...within, ...noCoord];
+  }
+
+  final noCoordSameArea = <ChefWithPickupDistance>[];
+  final noCoordOther = <ChefWithPickupDistance>[];
+  for (final e in noCoord) {
+    final kc = normalizeSaudiCityKey(e.chef.kitchenCity);
+    if (kc.isEmpty || kc == cityKey) {
+      noCoordSameArea.add(e);
+    } else {
+      noCoordOther.add(e);
+    }
+  }
+  noCoordSameArea.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+  noCoordOther.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+  return [...within, ...noCoordSameArea, ...noCoordOther];
+}
+
+/// Geographic “region” for reels: same as Home city/radius scope, without storefront gating.
+List<ChefWithPickupDistance> buildHomeSortedChefsForReels(
+  List<ChefDocModel> chefs,
+  double customerLat,
+  double customerLng,
+  String? pickupLocalityCity,
+) {
+  final cityKey = normalizeSaudiCityKey(pickupLocalityCity);
+  if (cityKey.isNotEmpty) {
+    final byCity = buildCityScopeChefsForReels(chefs, pickupLocalityCity, customerLat, customerLng);
+    if (byCity.isNotEmpty) return byCity;
+  }
+  return buildPickupSortedChefsForReels(
+    chefs,
+    customerLat,
+    customerLng,
+    pickupLocalityCity: pickupLocalityCity,
+  );
+}
+
+bool chefReelGeographyMatches(
+  ChefDocModel chef,
+  double customerLat,
+  double customerLng,
+  String? pickupLocalityCity,
+) {
+  return buildHomeSortedChefsForReels([chef], customerLat, customerLng, pickupLocalityCity).isNotEmpty;
+}
+
+/// Customer reels feed: kitchen region + approved + not frozen + reel flags handled separately.
+bool chefReelVisibleToCustomer(
+  ChefDocModel chef,
+  double customerLat,
+  double customerLng,
+  String? pickupLocalityCity,
+) {
+  if (!chef.hasKitchenMapPin) return false;
+  if (!chefReelAccountEligibleForPublicFeed(chef)) return false;
+  return chefReelGeographyMatches(chef, customerLat, customerLng, pickupLocalityCity);
+}
+
 class ChefWithPickupDistance {
   final ChefDocModel chef;
   final double? distanceKm;
@@ -41,14 +270,38 @@ class ChefWithPickupDistance {
   const ChefWithPickupDistance(this.chef, this.distanceKm);
 }
 
-/// Cooks accepting storefront orders (vacation / hours / open-now): within [kMaxPickupRadiusKm]
-/// sorted nearest first;
-/// then cooks without coordinates (demo / legacy rows).
+/// Single line for chef/dish UI: straight-line distance, or city/area fallback when the kitchen has no pin.
+String chefDistanceOrAreaLabel(ChefWithPickupDistance entry, String? pickupLocalityCity) {
+  final km = entry.distanceKm;
+  if (km != null) {
+    return formatDistanceKmAway(km);
+  }
+  return chefNoDistanceLocationHint(entry.chef, pickupLocalityCity);
+}
+
+/// When [chef_profiles.kitchen_latitude/longitude] are missing — prefer same normalized city as pickup, else show city name.
+String chefNoDistanceLocationHint(ChefDocModel chef, String? pickupLocalityCity) {
+  final pk = normalizeSaudiCityKey(pickupLocalityCity);
+  final ck = normalizeSaudiCityKey(chef.kitchenCity);
+  if (pk.isNotEmpty && ck.isNotEmpty && pk == ck) {
+    return 'Same area';
+  }
+  final raw = chef.kitchenCity?.trim() ?? '';
+  if (raw.isNotEmpty) return raw;
+  return 'No map location';
+}
+
+/// Cooks accepting storefront orders: those with kitchen coordinates within [kMaxPickupRadiusKm],
+/// sorted by actual distance (nearest first). Cooks without coordinates are listed after, ordered by
+/// [pickupLocalityCity] match ([chef_profiles.kitchen_city]) then kitchen name — so city/area is the
+/// fallback when distance cannot be computed.
 List<ChefWithPickupDistance> buildPickupSortedChefs(
   List<ChefDocModel> chefs,
   double customerLat,
-  double customerLng,
-) {
+  double customerLng, {
+  String? pickupLocalityCity,
+}) {
+  final cityKey = normalizeSaudiCityKey(pickupLocalityCity);
   final within = <ChefWithPickupDistance>[];
   final noCoord = <ChefWithPickupDistance>[];
   for (final c in chefs) {
@@ -65,16 +318,35 @@ List<ChefWithPickupDistance> buildPickupSortedChefs(
     }
   }
   within.sort((a, b) => a.distanceKm!.compareTo(b.distanceKm!));
-  return [...within, ...noCoord];
+
+  if (cityKey.isEmpty) {
+    noCoord.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+    return [...within, ...noCoord];
+  }
+
+  final noCoordSameArea = <ChefWithPickupDistance>[];
+  final noCoordOther = <ChefWithPickupDistance>[];
+  for (final e in noCoord) {
+    final kc = normalizeSaudiCityKey(e.chef.kitchenCity);
+    if (kc.isEmpty || kc == cityKey) {
+      noCoordSameArea.add(e);
+    } else {
+      noCoordOther.add(e);
+    }
+  }
+  noCoordSameArea.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+  noCoordOther.sort((a, b) => _compareKitchenName(a.chef, b.chef));
+  return [...within, ...noCoordSameArea, ...noCoordOther];
 }
 
-/// Chef ids visible in the same scope as the home "nearby" list.
+/// Chef ids visible in the same scope as Home ([buildHomeSortedChefs]).
 Set<String> pickupVisibleChefIds(
   List<ChefDocModel> chefs,
   double customerLat,
-  double customerLng,
-) {
-  return buildPickupSortedChefs(chefs, customerLat, customerLng)
+  double customerLng, {
+  String? pickupLocalityCity,
+}) {
+  return buildHomeSortedChefs(chefs, customerLat, customerLng, pickupLocalityCity)
       .map((e) => e.chef.chefId)
       .whereType<String>()
       .toSet();
@@ -93,17 +365,18 @@ String? pickupDistanceLabelForChef(
   return formatPickupDistanceKm(km);
 }
 
-/// Chef id → formatted distance for dish cards / lists.
+/// Chef id → distance/area line for dish cards / lists (same ordering as [buildHomeSortedChefs]).
 Map<String, String> pickupDistanceLabelsByChefId(
   List<ChefDocModel> chefs,
   double customerLat,
-  double customerLng,
-) {
+  double customerLng, {
+  String? pickupLocalityCity,
+}) {
   final m = <String, String>{};
-  for (final e in buildPickupSortedChefs(chefs, customerLat, customerLng)) {
+  for (final e in buildHomeSortedChefs(chefs, customerLat, customerLng, pickupLocalityCity)) {
     final id = e.chef.chefId;
-    if (id != null && e.distanceKm != null) {
-      m[id] = formatPickupDistanceKm(e.distanceKm!);
+    if (id != null && id.isNotEmpty) {
+      m[id] = chefDistanceOrAreaLabel(e, pickupLocalityCity);
     }
   }
   return m;

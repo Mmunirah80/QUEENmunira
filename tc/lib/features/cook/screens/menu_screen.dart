@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/menu/naham_menu_categories.dart';
 import '../../../core/theme/app_design_system.dart';
 import '../../../core/widgets/loading_widget.dart';
 import '../../../core/widgets/naham_empty_screens.dart';
@@ -39,16 +40,7 @@ class MenuScreen extends ConsumerStatefulWidget {
 class _MenuScreenState extends ConsumerState<MenuScreen> {
   int _selectedCategory = 0;
 
-  final _categories = [
-    'All',
-    'Northern',
-    'Southern',
-    'Eastern',
-    'Western',
-    'Najdi',
-    'Sweets',
-    'Other',
-  ];
+  List<String> get _categories => NahamMenuCategories.filterChipsWithAll;
 
   static List<Map<String, dynamic>> _filter(
     List<Map<String, dynamic>> dishes,
@@ -56,11 +48,17 @@ class _MenuScreenState extends ConsumerState<MenuScreen> {
     List<String> categories,
   ) {
     if (selectedCategory == 0) {
-      // "All" tab – show everything
       return dishes;
     }
     final cat = categories[selectedCategory];
-    return dishes.where((d) => d['category'] == cat).toList();
+    return dishes
+        .where(
+          (d) => NahamMenuCategories.dishMatchesFilter(
+                d['category'] as String?,
+                cat,
+              ),
+        )
+        .toList();
   }
 
   @override
@@ -144,18 +142,21 @@ class _MenuScreenState extends ConsumerState<MenuScreen> {
       color: _NC.surface,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
       child: SizedBox(
-        height: 36,
+        height: 40,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           itemCount: _categories.length,
           separatorBuilder: (_, __) => const SizedBox(width: 8),
           itemBuilder: (ctx, i) {
+            final label = _categories[i];
             final isSelected = i == _selectedCategory;
+            final asset = NahamMenuCategories.chipImageAssetById[label];
+            final icon = NahamMenuCategories.iconForChip(label);
             return GestureDetector(
               onTap: () => setState(() => _selectedCategory = i),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: const EdgeInsets.symmetric(horizontal: 14),
                 decoration: BoxDecoration(
                   color: isSelected ? _NC.primaryMid : _NC.bg,
                   borderRadius: BorderRadius.circular(20),
@@ -164,14 +165,33 @@ class _MenuScreenState extends ConsumerState<MenuScreen> {
                   ),
                 ),
                 child: Center(
-                  child: Text(
-                    _categories[i],
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight:
-                          isSelected ? FontWeight.w700 : FontWeight.w500,
-                      color: isSelected ? Colors.white : _NC.textSub,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (asset != null)
+                        CircleAvatar(
+                          radius: 11,
+                          backgroundColor:
+                              isSelected ? Colors.white.withValues(alpha: 0.35) : _NC.surface,
+                          backgroundImage: AssetImage(asset),
+                        )
+                      else
+                        Icon(
+                          icon,
+                          size: 17,
+                          color: isSelected ? Colors.white : _NC.textSub,
+                        ),
+                      const SizedBox(width: 8),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight:
+                              isSelected ? FontWeight.w700 : FontWeight.w500,
+                          color: isSelected ? Colors.white : _NC.textSub,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),

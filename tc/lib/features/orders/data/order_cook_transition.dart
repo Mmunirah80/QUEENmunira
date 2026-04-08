@@ -1,6 +1,14 @@
 import '../domain/entities/order_entity.dart';
 
-/// Chef-side transitions aligned with [public.is_valid_order_transition] (Supabase).
+/// Chef-side transitions on mapped [OrderStatus] (client reference only).
+///
+/// Server-side and Supabase datasource checks should use raw DB strings via
+/// `OrderDbStatus.canChefAcceptDbStatus`, `canChefRejectDbStatus`, and `canChefAdvanceDbStatus`
+/// in `order_db_status.dart`, because hydration can leave unknown values unmapped while the row is
+/// still actionable.
+///
+/// Aligned conceptually with [public.is_valid_order_transition] (Supabase). Keep in sync with
+/// `supabase_order_state_machine.sql` and patches (e.g. `supabase_orders_cancelled_by_system_v1.sql`).
 abstract final class OrderCookTransition {
   OrderCookTransition._();
 

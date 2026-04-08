@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../core/supabase/profiles_table_select.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../domain/entities/user_entity.dart';
 import '../models/user_model.dart';
@@ -38,7 +39,7 @@ class ChefRegistrationDataSource {
   }
 
   /// Creates account, sets role chef + pending approval, uploads two documents (optional expiry per file).
-  /// Second file is stored as [freelancer_id] so it matches app compliance (national + freelance permit).
+  /// Two required slots: [id_document] + [health_or_kitchen_document] (see CookRequiredDocumentTypes).
   ///
   /// A global timeout may fire mid-flow; on timeout we [signOut] so a partial session does not trap the user.
   /// If auth already succeeded server-side, the cook may need to sign in and finish from support (rare edge case).
@@ -151,13 +152,14 @@ class ChefRegistrationDataSource {
         await _sb.storage.from(_bucket).upload(
           path,
           file,
-          fileOptions: const FileOptions(upsert: false, contentType: 'image/jpeg'),
+          fileOptions: const FileOptions(contentType: 'image/jpeg'),
         );
         final row = <String, dynamic>{
           'chef_id': uid,
           'document_type': docType,
           'file_url': path,
-          'status': 'pending',
+          'status': 'pending_review',
+          'no_expiry': expiry == null,
         };
         if (expiry != null) {
           row['expiry_date'] =
@@ -173,17 +175,19 @@ class ChefRegistrationDataSource {
 
       final first = await uploadAndInsert(
         file: nationalIdFile,
-        docType: 'national_id',
+        docType: 'id_document',
         expiry: nationalIdExpiry,
       );
       steps.add((rowId: first.rowId, storagePath: first.path));
 
       final second = await uploadAndInsert(
         file: healthCertFile,
-        docType: 'freelancer_id',
+        docType: 'health_or_kitchen_document',
         expiry: healthCertExpiry,
       );
       steps.add((rowId: second.rowId, storagePath: second.path));
+
+      await _sb.rpc<void>('chef_recompute_access_for_self');
 
       return await _loadUserModel(uid);
     } catch (e, st) {
@@ -205,14 +209,8 @@ class ChefRegistrationDataSource {
     if (authUser == null) {
       throw Exception('Session lost after registration.');
     }
-    final profile = await _sb
-        .from('profiles')
-        .select(
-          'id, role, full_name, phone, avatar_url, profile_image_url, is_blocked, '
-          'chef_profiles!chef_profiles_id_fkey(approval_status, rejection_reason)',
-        )
-        .eq('id', uid)
-        .maybeSingle();
+    final sel = await resolveProfilesSelectForAuth(_sb);
+    final profile = await _sb.from('profiles').select(sel).eq('id', uid).maybeSingle();
 
     if (profile == null) {
       return UserModel(
@@ -223,34 +221,43 @@ class ChefRegistrationDataSource {
             'User',
         isVerified: authUser.emailConfirmedAt != null,
         role: AppRole.chef,
+        chefAccessLevel: ChefAccessLevel.partialAccess,
         chefApprovalStatus: ChefApprovalStatus.pending,
       );
     }
 
     final p = profile;
     ChefApprovalStatus? chefStatus;
+    ChefAccessLevel? chefAccess;
     String? rejectionReason;
     final chefRaw = p['chef_profiles'];
     if (chefRaw is List && chefRaw.isNotEmpty) {
       final row = chefRaw.first as Map<String, dynamic>;
       chefStatus = _chefApprovalFromStatus(row['approval_status'] as String?);
       rejectionReason = row['rejection_reason'] as String?;
+      chefAccess = _chefAccessLevelFromRow(row);
     } else if (chefRaw is Map<String, dynamic>) {
       chefStatus = _chefApprovalFromStatus(chefRaw['approval_status'] as String?);
       rejectionReason = chefRaw['rejection_reason'] as String?;
+      chefAccess = _chefAccessLevelFromRow(chefRaw);
     }
-    if (chefStatus == null) {
+    if (chefStatus == null || chefAccess == null) {
       final row = await _sb
           .from('chef_profiles')
-          .select('approval_status,rejection_reason')
+          .select('approval_status,rejection_reason,access_level')
           .eq('id', uid)
           .maybeSingle();
       if (row != null) {
         final m = row;
-        chefStatus = _chefApprovalFromStatus(m['approval_status'] as String?);
-        rejectionReason = m['rejection_reason'] as String?;
+        chefStatus ??= _chefApprovalFromStatus(m['approval_status'] as String?);
+        rejectionReason ??= m['rejection_reason'] as String?;
+        chefAccess ??= _chefAccessLevelFromRow(m);
       }
     }
+
+    final blocked = p['is_blocked'] as bool? ?? false;
+    chefAccess ??= ChefAccessLevel.partialAccess;
+    if (blocked) chefAccess = ChefAccessLevel.blockedAccess;
 
     return UserModel(
       id: uid,
@@ -261,16 +268,32 @@ class ChefRegistrationDataSource {
           p['avatar_url'] as String? ?? p['profile_image_url'] as String?,
       isVerified: authUser.emailConfirmedAt != null,
       role: AppRole.chef,
+      chefAccessLevel: chefAccess,
       chefApprovalStatus: chefStatus ?? ChefApprovalStatus.pending,
       rejectionReason: rejectionReason,
-      isBlocked: p['is_blocked'] as bool? ?? false,
+      isBlocked: blocked,
     );
+  }
+
+  ChefAccessLevel? _chefAccessLevelFromRow(Map<String, dynamic> row) {
+    final raw = (row['access_level'] ?? '').toString().toLowerCase().trim();
+    switch (raw) {
+      case 'full_access':
+        return ChefAccessLevel.fullAccess;
+      case 'partial_access':
+        return ChefAccessLevel.partialAccess;
+      case 'blocked_access':
+        return ChefAccessLevel.blockedAccess;
+      default:
+        return null;
+    }
   }
 
   ChefApprovalStatus? _chefApprovalFromStatus(String? status) {
     if (status == null) return null;
     switch (status.toLowerCase()) {
       case 'pending':
+      case 'waiting':
         return ChefApprovalStatus.pending;
       case 'approved':
         return ChefApprovalStatus.approved;

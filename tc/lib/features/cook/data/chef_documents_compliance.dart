@@ -1,52 +1,34 @@
-/// Interprets [chef_documents] rows for a single chef (any sort order).
+import 'cook_required_document_types.dart';
+
+/// Interprets [chef_documents] rows for a single chef (one effective row per required slot).
 ///
-/// Rules (onboarding vs renewal):
-/// - If the **newest** row for a type is `rejected`, that type fails (admin
-///   rejected the latest submission — stop operations until fixed).
-/// - Otherwise the type passes if **any** row (newest first) is `approved` and
-///   not past [expiry_date]. So a new `pending` upload does not block work while
-///   an older approved doc is still valid.
+/// Rules:
+/// - Required slots [CookRequiredDocumentTypes.requiredSlots] must be `approved` with valid expiry.
+/// - `pending_review`, `rejected`, `expired` fail operations until resolved.
+/// - Legacy [national_id]/[freelancer_id]/[license] rows are merged into the two canonical slots.
 class ChefDocumentsCompliance {
   ChefDocumentsCompliance({
     required this.canReceiveOrders,
     required this.expiringWithinDays,
   });
 
-  /// Types that must pass [_typeAllowsOperations] for the cook to go online.
-  static const List<String> requiredTypes = [
-    'national_id',
-    'freelancer_id',
-  ];
+  /// Canonical types only (for callers/tests).
+  static List<String> get requiredTypes => List<String>.from(CookRequiredDocumentTypes.requiredSlots);
 
   final bool canReceiveOrders;
 
-  /// document_type → days until expiry for the **latest approved** row with an
-  /// expiry date (null expiry ignored). Only non-negative days &le; [within].
   final Map<String, int> expiringWithinDays;
 
   static ChefDocumentsCompliance evaluate(
     List<Map<String, dynamic>> rows, {
     int warnWithinDays = 7,
   }) {
-    final byType = <String, List<Map<String, dynamic>>>{};
-    for (final r in rows) {
-      final t = (r['document_type'] ?? '').toString();
-      byType.putIfAbsent(t, () => []).add(Map<String, dynamic>.from(r));
-    }
-    for (final list in byType.values) {
-      list.sort((a, b) {
-        final ca = _parseCreated(a['created_at']) ??
-            DateTime.fromMillisecondsSinceEpoch(0);
-        final cb = _parseCreated(b['created_at']) ??
-            DateTime.fromMillisecondsSinceEpoch(0);
-        return cb.compareTo(ca);
-      });
-    }
+    final bySlot = CookRequiredDocumentTypes.latestRowPerRequiredSlot(rows);
 
     var ok = true;
-    for (final t in requiredTypes) {
-      final list = byType[t] ?? [];
-      if (!_typeAllowsOperations(list)) {
+    for (final slot in CookRequiredDocumentTypes.requiredSlots) {
+      final row = bySlot[slot];
+      if (!_typeAllowsOperations(row)) {
         ok = false;
       }
     }
@@ -55,19 +37,18 @@ class ChefDocumentsCompliance {
     if (warnWithinDays > 0) {
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
-      for (final t in requiredTypes) {
-        final list = byType[t] ?? [];
-        for (final r in list) {
-          if ((r['status'] ?? '').toString().toLowerCase() != 'approved') {
-            continue;
-          }
-          final exp = _parseDateOnly(r['expiry_date']);
-          if (exp == null) continue;
-          final d = exp.difference(today).inDays;
-          if (d >= 0 && d <= warnWithinDays) {
-            expiring[t] = d;
-            break;
-          }
+      for (final slot in CookRequiredDocumentTypes.requiredSlots) {
+        final row = bySlot[slot];
+        if (row == null) continue;
+        if ((row['status'] ?? '').toString().toLowerCase() != 'approved') {
+          continue;
+        }
+        if (row['no_expiry'] == true) continue;
+        final exp = _parseDateOnly(row['expiry_date']);
+        if (exp == null) continue;
+        final d = exp.difference(today).inDays;
+        if (d >= 0 && d <= warnWithinDays) {
+          expiring[slot] = d;
         }
       }
     }
@@ -76,13 +57,6 @@ class ChefDocumentsCompliance {
       canReceiveOrders: ok,
       expiringWithinDays: expiring,
     );
-  }
-
-  static DateTime? _parseCreated(Object? v) {
-    if (v == null) return null;
-    if (v is DateTime) return v;
-    if (v is String) return DateTime.tryParse(v);
-    return null;
   }
 
   static DateTime? _parseDateOnly(Object? v) {
@@ -98,7 +72,6 @@ class ChefDocumentsCompliance {
     return null;
   }
 
-  /// `expiry_date` is inclusive for that calendar day; expired starting next day.
   static bool isDocumentExpired(Object? expiryRaw) => _isExpired(expiryRaw);
 
   static bool _isExpired(Object? expiryRaw) {
@@ -109,18 +82,16 @@ class ChefDocumentsCompliance {
     return exp.isBefore(today);
   }
 
-  /// Newest-first list for one [document_type].
-  static bool _typeAllowsOperations(List<Map<String, dynamic>> sortedNewestFirst) {
-    if (sortedNewestFirst.isEmpty) return false;
-    final latestStatus =
-        (sortedNewestFirst.first['status'] ?? '').toString().toLowerCase();
-    if (latestStatus == 'rejected') return false;
-    for (final r in sortedNewestFirst) {
-      final st = (r['status'] ?? '').toString().toLowerCase();
-      if (st != 'approved') continue;
-      if (isDocumentExpired(r['expiry_date'])) continue;
-      return true;
+  /// Single effective row per required slot.
+  static bool _typeAllowsOperations(Map<String, dynamic>? row) {
+    if (row == null) return false;
+    final st = (row['status'] ?? '').toString().toLowerCase();
+    if (st == 'rejected' || st == 'pending_review' || st == 'expired') {
+      return false;
     }
-    return false;
+    if (st != 'approved') return false;
+    if (row['no_expiry'] == true) return true;
+    if (isDocumentExpired(row['expiry_date'])) return false;
+    return true;
   }
 }

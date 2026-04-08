@@ -3,9 +3,12 @@
 // Categories, grid, Kitchens & Chefs, pull to refresh, add to cart with snackbar.
 // ============================================================
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:naham_cook_app/core/menu/naham_menu_categories.dart';
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
 import 'package:naham_cook_app/core/utils/supabase_error_message.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
@@ -23,6 +26,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:naham_cook_app/core/location/customer_location_service.dart';
 import 'package:naham_cook_app/core/location/pickup_distance.dart';
 import 'package:naham_cook_app/features/customer/screens/map_pin_picker_screen.dart';
+import 'package:naham_cook_app/features/customer/domain/customer_discovery_sorting.dart';
 
 class _C {
   static const primary = AppDesignSystem.primary;
@@ -40,26 +44,8 @@ class NahamCustomerHomeScreen extends ConsumerStatefulWidget {
   ConsumerState<NahamCustomerHomeScreen> createState() => _NahamCustomerHomeScreenState();
 }
 
-/// Fixed category chips: images for Najdi/Northern/Eastern/Southern, icons for All/Sweets/Other.
-const _categoryChips = ['All', 'Najdi', 'Northern', 'Eastern', 'Southern', 'Sweets', 'Other'];
-const _categoryImages = <String, String>{
-  'Najdi': 'assets/images/nj.png',
-  'Northern': 'assets/images/nt.png',
-  'Eastern': 'assets/images/es.png',
-  'Southern': 'assets/images/so.png',
-};
-const _categoryIcons = <String, IconData>{
-  'All': Icons.restaurant_menu,
-  'Najdi': Icons.rice_bowl,
-  'Northern': Icons.kebab_dining,
-  'Eastern': Icons.set_meal,
-  'Southern': Icons.soup_kitchen,
-  'Sweets': Icons.cake,
-  'Other': Icons.fastfood,
-};
-
 class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScreen> with SingleTickerProviderStateMixin {
-  String _activeCategory = 'All';
+  String _activeCategory = NahamMenuCategories.allChipLabel;
 
   late final AnimationController _dishFadeController;
   String _dishFadeSignature = '';
@@ -130,8 +116,6 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
 
   @override
   Widget build(BuildContext context) {
-    final dishesAsync = ref.watch(availableDishesStreamProvider);
-    final chefsAsync = ref.watch(chefsForCustomerStreamProvider);
     final cartCount = ref.watch(cartCountProvider);
     final notifications = ref.watch(customerNotificationsStreamProvider).valueOrNull ?? [];
     final unreadCount = notifications.where((n) => (n['is_read'] as bool? ?? false) == false).length;
@@ -162,7 +146,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                       ),
                       const SizedBox(height: 16),
                       const Text(
-                        'Allow location or pick on map',
+                        'Choose your location',
                         style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text),
                       ),
                       const SizedBox(height: 8),
@@ -188,19 +172,27 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
             )
           else
             Expanded(
-                    child: dishesAsync.when(
+              child: Consumer(
+                builder: (context, ref, _) {
+                  final dishesAsync = ref.watch(availableDishesStreamProvider);
+                  final chefsAsync = ref.watch(chefsForCustomerStreamProvider);
+                  final origin = ref.watch(customerPickupOriginProvider);
+                  if (origin == null) return const SizedBox.shrink();
+                  return dishesAsync.when(
               data: (dishes) {
                 return chefsAsync.when(
                   data: (chefs) {
-                    final sorted = buildPickupSortedChefs(
+                    final sorted = buildHomeSortedChefs(
                       chefs,
-                      pickupOrigin.latitude,
-                      pickupOrigin.longitude,
+                      origin.latitude,
+                      origin.longitude,
+                      origin.localityCity,
                     );
                     return RefreshIndicator(
                       onRefresh: () async {
                         ref.invalidate(availableDishesStreamProvider);
                         ref.invalidate(chefsForCustomerStreamProvider);
+                        ref.invalidate(customerReelsStreamProvider);
                       },
                       child: SingleChildScrollView(
                         physics: const AlwaysScrollableScrollPhysics(),
@@ -208,8 +200,9 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             _buildCategoryChips(),
-                            _buildDishesSection(context, dishes, sorted),
-                            _buildChefsSection(context, sorted),
+                            _buildLocationContextLine(origin),
+                            _buildDishesSection(context, dishes, sorted, origin.localityCity),
+                            _buildChefsSection(context, sorted, origin),
                             const SizedBox(height: 100),
                           ],
                         ),
@@ -228,7 +221,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                             physics: const NeverScrollableScrollPhysics(),
                             crossAxisSpacing: 12,
                             mainAxisSpacing: 12,
-                            childAspectRatio: 0.72,
+                            childAspectRatio: 0.62,
                             children: const [
                               SkeletonBox(height: 170, borderRadius: 16),
                               SkeletonBox(height: 170, borderRadius: 16),
@@ -276,8 +269,10 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                   ],
                 ),
               ),
+            );
+                },
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -468,6 +463,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
       longitude: lng,
       label: geo.shortLabel,
       detailLabel: geo.detailLine,
+      localityCity: geo.localityCity,
     );
     ref.read(customerPickupOriginProvider.notifier).state = origin;
     ref.read(customerLocationProvider.notifier).state = CustomerLocationData(
@@ -564,15 +560,31 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
     );
   }
 
+  /// One line under cuisine chips: clarifies that location comes from the pickup pin / GPS, not profile.
+  Widget _buildLocationContextLine(CustomerPickupOrigin origin) {
+    final raw = origin.localityCity?.trim();
+    final hasCity = raw != null && raw.isNotEmpty;
+    final line = hasCity
+        ? 'Showing nearby chefs and dishes in $raw'
+        : 'Using your pickup location — we could not detect a city name; showing cooks within ${kMaxPickupRadiusKm.toStringAsFixed(0)} km.';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Text(
+        line,
+        style: TextStyle(fontSize: 12.5, color: _C.textSub, height: 1.35, fontWeight: FontWeight.w500),
+      ),
+    );
+  }
+
   Widget _buildCategoryChips() {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       child: Row(
-        children: _categoryChips.map((c) {
+        children: NahamMenuCategories.filterChipsWithAll.map((c) {
           final isActive = _activeCategory == c;
-          final imagePath = _categoryImages[c];
-          final icon = _categoryIcons[c] ?? Icons.restaurant_menu;
+          final imagePath = NahamMenuCategories.chipImageAssetById[c];
+          final icon = NahamMenuCategories.iconForChip(c);
           return Padding(
             padding: const EdgeInsets.only(right: 8),
             child: GestureDetector(
@@ -618,6 +630,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
     BuildContext context,
     List<DishEntity> dishes,
     List<ChefWithPickupDistance> sortedChefs,
+    String? pickupLocalityCity,
   ) {
     if (dishes.isEmpty) {
       return Padding(
@@ -642,8 +655,8 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: _C.text),
               ),
               const SizedBox(height: 8),
-              const Text(
-                'When cooks near your pickup point list dishes, they appear here. You can also try another map location.',
+              Text(
+                'When nearby kitchens list dishes for your pickup location, they appear here.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: _C.textSub),
               ),
@@ -668,8 +681,9 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
     final nearbyDishes = pickupChefIds.isEmpty
         ? <DishEntity>[]
         : dishes.where((d) => d.chefId != null && pickupChefIds.contains(d.chefId)).toList();
+    final nearbyDishesSorted = sortDishesByChefDistanceOrder(nearbyDishes, sortedChefs);
 
-    if (nearbyDishes.isEmpty) {
+    if (nearbyDishesSorted.isEmpty) {
       return Padding(
         padding: const EdgeInsets.all(24),
         child: Center(
@@ -687,13 +701,15 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
               ),
               const SizedBox(height: 12),
               Text(
-                'No cooks (or dishes) within ${kMaxPickupRadiusKm.toStringAsFixed(0)} km of your pickup point.',
+                sortedChefs.isEmpty
+                    ? 'No dishes match this pickup location right now.'
+                    : 'No dishes listed by nearby kitchens yet. Try another category or check back later.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(fontSize: 14, color: _C.textSub, height: 1.35),
               ),
               const SizedBox(height: 8),
-              const Text(
-                'No cooks near you — try a second backup location on the map (another district or area).',
+              Text(
+                'Tip: move your pickup pin or use GPS so we can match your city and distance.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 13, color: _C.textSub, height: 1.35),
               ),
@@ -716,20 +732,21 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
 
     final favoriteIds = ref.watch(favoriteDishIdsStreamProvider).valueOrNull ?? [];
     final uid = ref.watch(customerIdProvider);
-    final filtered = _activeCategory == 'All'
-        ? nearbyDishes
-        : nearbyDishes
-            .where((d) => d.categories.any((cat) => cat.toLowerCase() == _activeCategory.toLowerCase()))
-            .toList();
+    final filtered = nearbyDishesSorted
+        .where(
+          (d) => NahamMenuCategories.dishMatchesFilter(
+                d.categories.isNotEmpty ? d.categories.first : null,
+                _activeCategory,
+              ),
+        )
+        .toList();
     final chefById = <String, ChefDocModel>{};
     final distanceByChefId = <String, String>{};
     for (final e in sortedChefs) {
       final id = e.chef.chefId;
       if (id != null && id.isNotEmpty) {
         chefById[id] = e.chef;
-        if (e.distanceKm != null) {
-          distanceByChefId[id] = formatPickupDistanceKm(e.distanceKm!);
-        }
+        distanceByChefId[id] = chefDistanceOrAreaLabel(e, pickupLocalityCity);
       }
     }
     if (filtered.isEmpty) {
@@ -761,14 +778,17 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Popular Dishes Near You', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text)),
+          const Text(
+            'Popular dishes',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text),
+          ),
           const SizedBox(height: 12),
           GridView.builder(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2,
-              childAspectRatio: 0.72,
+              childAspectRatio: 0.62,
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
             ),
@@ -786,16 +806,24 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                   chefName: chefName,
                   pickupDistanceLabel: chefId.isNotEmpty ? distanceByChefId[chefId] : null,
                   onAddToCart: () {
-                    if (chefId.isEmpty) return;
+                    Future<void> add() async {
+                      if (chefId.isEmpty) return;
+                      final frozen =
+                          await ref.read(chefOrderingDisabledForCustomerProvider(chefId).future);
+                      if (!context.mounted) return;
+                      if (frozen) {
+                        SnackbarHelper.error(context, 'Temporarily unavailable');
+                        return;
+                      }
                       final cartItems = ref.read(cartProvider);
-                      final inCart = cartItems.where((e) => e.dishId == dish.id).fold<int>(0, (s, e) => s + e.quantity);
+                      final inCart = cartQuantityForDishChef(cartItems, dish.id, chefId);
                       final remaining = dish.remainingQuantity;
 
                       print('[QuantityCheck][AddToCart] dishId=${dish.id} chefId=$chefId inCart=$inCart remaining=$remaining');
 
                       if (remaining <= 0) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: const Text('This dish is sold out'), backgroundColor: Colors.red),
+                          const SnackBar(content: Text('This dish is sold out'), backgroundColor: Colors.red),
                         );
                         return;
                       }
@@ -810,6 +838,9 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                       if (context.mounted) {
                         SnackbarHelper.success(context, '${dish.name} added to cart');
                       }
+                    }
+
+                    unawaited(add());
                   },
                   onChefTap: chefId.isEmpty
                       ? null
@@ -817,16 +848,16 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                             context,
                             _fadeRoute(ChefProfileScreen(chefId: chefId)),
                           ),
-                  isFavorite: dish.id != null && favoriteIds.contains(dish.id),
-                  onToggleFavorite: dish.id == null || uid == null || uid.isEmpty
+                  isFavorite: favoriteIds.contains(dish.id),
+                  onToggleFavorite: uid.isEmpty
                       ? null
                       : () {
                           final inFav = favoriteIds.contains(dish.id);
                           print('Fav toggle: uid=$uid, dish=${dish.id}, wasFav=$inFav');
                           if (inFav) {
-                            ref.read(customerFirebaseDataSourceProvider).removeFavorite(uid, dish.id!);
+                            ref.read(customerFirebaseDataSourceProvider).removeFavorite(uid, dish.id);
                           } else {
-                            ref.read(customerFirebaseDataSourceProvider).addFavorite(uid, dish.id!);
+                            ref.read(customerFirebaseDataSourceProvider).addFavorite(uid, dish.id);
                           }
                           ref.invalidate(favoriteDishIdsStreamProvider);
                         },
@@ -839,7 +870,11 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
     );
   }
 
-  Widget _buildChefsSection(BuildContext context, List<ChefWithPickupDistance> sortedChefs) {
+  Widget _buildChefsSection(
+    BuildContext context,
+    List<ChefWithPickupDistance> sortedChefs,
+    CustomerPickupOrigin pickupOrigin,
+  ) {
     if (sortedChefs.isEmpty) {
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -852,7 +887,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
-                    'No cooks near you',
+                    'No kitchens for this pickup',
                     style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: _C.text),
                   ),
                 ),
@@ -860,7 +895,9 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
             ),
             const SizedBox(height: 8),
             Text(
-              'There are no cooks within pickup range of this point. Try a backup location on the map — for example another district, mall area, or where you usually meet people.',
+              normalizeSaudiCityKey(pickupOrigin.localityCity).isNotEmpty
+                  ? 'No accepting kitchens match your area yet. Try another pickup point or check back later.'
+                  : 'No accepting kitchens within ${kMaxPickupRadiusKm.toStringAsFixed(0)} km (or we need a clearer city from your pin). Try another location.',
               style: TextStyle(fontSize: 13, color: _C.textSub, height: 1.4, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
@@ -883,10 +920,13 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Cooks near you', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text)),
+          const Text(
+            'Kitchens near you',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text),
+          ),
           const SizedBox(height: 12),
           SizedBox(
-            height: 132,
+            height: 158,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: sortedChefs.length,
@@ -895,11 +935,13 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                 final entry = sortedChefs[i];
                 final chef = entry.chef;
                 final chefId = chef.chefId ?? '';
-                final dist = entry.distanceKm != null ? formatPickupDistanceKm(entry.distanceKm!) : null;
+                final line = chefDistanceOrAreaLabel(entry, pickupOrigin.localityCity);
                 final rating = chef.ratingAvg;
+                final hasKm = entry.distanceKm != null;
                 return ChefCard(
                   kitchenName: chef.kitchenName ?? 'Kitchen',
-                  distanceLabel: dist,
+                  distanceOrAreaLine: line,
+                  isStraightLineDistance: hasKm,
                   rating: rating,
                   onTap: chefId.isEmpty
                       ? () {}
@@ -948,7 +990,7 @@ class DishCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final heroTag = dish.id != null ? 'dish_${dish.id}' : null;
+    final heroTag = 'dish_${dish.id}';
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -974,7 +1016,7 @@ class DishCard extends StatelessWidget {
                             errorBuilder: (_, __, ___) => _imagePlaceholder(),
                           )
                         : _imagePlaceholder();
-                    return heroTag != null ? Hero(tag: heroTag, child: inner) : inner;
+                    return Hero(tag: heroTag, child: inner);
                   })(),
                 ),
                 if (onToggleFavorite != null)
@@ -1008,9 +1050,19 @@ class DishCard extends StatelessWidget {
           Text(
             dish.name,
             style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _C.text),
-            maxLines: 1,
+            maxLines: 2,
             overflow: TextOverflow.ellipsis,
           ),
+          if (dish.description.trim().isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              dish.description.trim(),
+              style: TextStyle(fontSize: 11, height: 1.2, color: _C.textSub, fontWeight: FontWeight.w500),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+          SizedBox(height: dish.description.trim().isNotEmpty ? 4 : 2),
           Text(
             '${dish.price.toStringAsFixed(0)} SAR',
             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _C.primary),
@@ -1114,14 +1166,18 @@ class DishCard extends StatelessWidget {
 class ChefCard extends StatelessWidget {
   final String kitchenName;
   final VoidCallback onTap;
-  final String? distanceLabel;
+  /// From [chefDistanceOrAreaLabel] — e.g. "3.2 km away" or "Same area".
+  final String distanceOrAreaLine;
+  /// When true, line is a straight-line km distance (show icon + "Distance" section).
+  final bool isStraightLineDistance;
   final double? rating;
 
   const ChefCard({
     super.key,
     required this.kitchenName,
     required this.onTap,
-    this.distanceLabel,
+    required this.distanceOrAreaLine,
+    required this.isStraightLineDistance,
     this.rating,
   });
 
@@ -1130,8 +1186,8 @@ class ChefCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        width: 168,
-        padding: const EdgeInsets.all(12),
+        width: 176,
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
         decoration: BoxDecoration(
           color: _C.surface,
           borderRadius: BorderRadius.circular(16),
@@ -1141,15 +1197,15 @@ class ChefCard extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Container(
-              width: 44,
-              height: 44,
+              width: 40,
+              height: 40,
               decoration: BoxDecoration(
                 color: _C.primaryLight.withValues(alpha: 0.5),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(Icons.person_rounded, color: _C.primary, size: 26),
+              child: const Icon(Icons.person_rounded, color: _C.primary, size: 24),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
             Text(
               kitchenName,
               style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
@@ -1163,35 +1219,59 @@ class ChefCard extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.star_rounded, size: 14, color: Colors.amber.shade700),
+                  Icon(Icons.star_rounded, size: 13, color: Colors.amber.shade700),
                   Text(
                     rating!.toStringAsFixed(1),
-                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _C.textSub),
+                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: _C.textSub),
                   ),
                 ],
               ),
             ],
-            if (distanceLabel != null) ...[
-              const SizedBox(height: 4),
+            const SizedBox(height: 6),
+            Text(
+              isStraightLineDistance ? 'Distance' : 'Area',
+              style: TextStyle(
+                fontSize: 9.5,
+                fontWeight: FontWeight.w700,
+                color: _C.textSub,
+                letterSpacing: 0.4,
+              ),
+            ),
+            const SizedBox(height: 2),
+            if (isStraightLineDistance)
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
-                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.straighten_rounded, size: 12, color: _C.primary),
-                  const SizedBox(width: 2),
-                  Text(
-                    distanceLabel!,
-                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _C.primary),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Icon(Icons.near_me_rounded, size: 13, color: _C.primary),
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      distanceOrAreaLine,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: _C.primary,
+                        height: 1.2,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                 ],
-              ),
-            ] else ...[
-              const SizedBox(height: 4),
+              )
+            else
               Text(
-                'Pin not set',
-                style: TextStyle(fontSize: 10, color: _C.textSub, fontWeight: FontWeight.w500),
+                distanceOrAreaLine,
+                style: TextStyle(fontSize: 11.5, color: _C.textSub, fontWeight: FontWeight.w600, height: 1.2),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
               ),
-            ],
           ],
         ),
       ),

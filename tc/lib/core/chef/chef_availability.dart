@@ -1,10 +1,24 @@
 /// Single source of truth for "chef visible / accepting orders" on the storefront.
 ///
-/// Rule (same as product spec):
-/// available ⇔ NOT on vacation AND within working hours AND [is_online] is true.
+/// Rule:
+/// - If admin freeze is active (`freeze_until` > now) → not accepting (reason [ChefStorefrontReason.frozen]).
+/// - Else: available ⇔ NOT on vacation AND within working hours AND [is_online] is true.
+///
+/// Debug: set to true temporarily to trace availability bugs (toggle / hours / vacation).
 library;
 
+const bool kDebugChefAvailability = false;
+
+void _chefAvailLog(String message) {
+  if (kDebugChefAvailability) {
+    // ignore: avoid_print
+    print('[ChefAvailability] $message');
+  }
+}
+
 enum ChefStorefrontReason {
+  /// Admin freeze active ([freeze_until] in the future). No new orders; Cook UI shows banner.
+  frozen,
   accepting,
   vacation,
   outsideWorkingHours,
@@ -16,6 +30,8 @@ class ChefStorefrontEvaluation {
     required this.isAcceptingOrders,
     required this.reason,
     this.opensAtLabel,
+    this.frozenUntil,
+    this.freezeType,
   });
 
   final bool isAcceptingOrders;
@@ -23,9 +39,15 @@ class ChefStorefrontEvaluation {
 
   /// When [reason] is [outsideWorkingHours], today's scheduled open time (24h), if known.
   final String? opensAtLabel;
+
+  /// When [reason] is [frozen], end of freeze (same instant as DB `freeze_until`).
+  final DateTime? frozenUntil;
+
+  /// `soft` or `hard` from `chef_profiles.freeze_type` when frozen.
+  final String? freezeType;
 }
 
-int? _parseTimeToMinutes(String? s) {
+int? _parseTimeToMinutes24h(String? s) {
   if (s == null) return null;
   final t = s.trim();
   if (t.isEmpty) return null;
@@ -36,6 +58,27 @@ int? _parseTimeToMinutes(String? s) {
   if (h == null || m == null) return null;
   if (h < 0 || h > 23 || m < 0 || m > 59) return null;
   return h * 60 + m;
+}
+
+/// Legacy rows saved with locale `TimeOfDay.format` (e.g. `9:00 AM`). Prefer 24h on write.
+int? _parseTimeToMinutes12hLegacy(String? s) {
+  if (s == null) return null;
+  final trimmed = s.trim().replaceAll('\u202f', ' ');
+  if (trimmed.isEmpty) return null;
+  final m = RegExp(r'^(\d{1,2}):(\d{2})\s*([AaPp][Mm])').firstMatch(trimmed);
+  if (m == null) return null;
+  var h = int.tryParse(m.group(1)!) ?? 0;
+  final min = int.tryParse(m.group(2)!) ?? 0;
+  if (min < 0 || min > 59) return null;
+  final ap = m.group(3)!.toUpperCase();
+  if (ap == 'PM' && h < 12) h += 12;
+  if (ap == 'AM' && h == 12) h = 0;
+  if (h < 0 || h > 23) return null;
+  return h * 60 + min;
+}
+
+int? _parseTimeToMinutes(String? s) {
+  return _parseTimeToMinutes24h(s) ?? _parseTimeToMinutes12hLegacy(s);
 }
 
 bool _minutesWithinWindow(int nowMin, int startMin, int endMin) {
@@ -108,6 +151,10 @@ String? todaysOpeningTimeLabel({
 }) {
   final t = now ?? DateTime.now();
 
+  if (workingHoursJson != null && workingHoursJson.isEmpty) {
+    return null;
+  }
+
   if (workingHoursJson != null && workingHoursJson.isNotEmpty) {
     final day = _dayEntryForWeekday(workingHoursJson, t.weekday);
     if (day != null) {
@@ -143,6 +190,17 @@ bool isWithinWorkingHours({
 }) {
   final t = now ?? DateTime.now();
   final nowMin = t.hour * 60 + t.minute;
+  _chefAvailLog(
+    'isWithinWorkingHours now=$t nowMin=$nowMin weekday=${t.weekday} '
+    'legacyStart=$workingHoursStart legacyEnd=$workingHoursEnd '
+    'jsonEmpty=${workingHoursJson == null || workingHoursJson.isEmpty}',
+  );
+
+  // Saved with all days off → `{}`. Do not fall back to legacy (would look "open").
+  if (workingHoursJson != null && workingHoursJson.isEmpty) {
+    _chefAvailLog('working_hours empty object -> outside working hours');
+    return false;
+  }
 
   if (workingHoursJson != null && workingHoursJson.isNotEmpty) {
     final day = _dayEntryForWeekday(workingHoursJson, t.weekday);
@@ -160,8 +218,14 @@ bool isWithinWorkingHours({
           close.trim().isNotEmpty) {
         final a = _parseTimeToMinutes(open);
         final b = _parseTimeToMinutes(close);
+        _chefAvailLog(
+          'weekly today open="$open" close="$close" -> minutes a=$a b=$b '
+          '(if null, string is not HH:mm — e.g. 12h locale breaks availability)',
+        );
         if (a == null || b == null) return false;
-        return _minutesWithinWindow(nowMin, a, b);
+        final inside = _minutesWithinWindow(nowMin, a, b);
+        _chefAvailLog('weekly window inside=$inside');
+        return inside;
       }
     }
     // JSON exists for the week but today has no slot: fall back to legacy columns.
@@ -178,9 +242,12 @@ bool isWithinWorkingHours({
   final e = _parseTimeToMinutes(workingHoursEnd);
   if (s == null || e == null) {
     // No schedule configured → do not block (backward compatible with toggle-only kitchens).
+    _chefAvailLog('legacy columns missing or unparseable -> withinHours=true');
     return true;
   }
-  return _minutesWithinWindow(nowMin, s, e);
+  final legacyInside = _minutesWithinWindow(nowMin, s, e);
+  _chefAvailLog('legacy window s=$s e=$e inside=$legacyInside');
+  return legacyInside;
 }
 
 ChefStorefrontEvaluation evaluateChefStorefront({
@@ -191,28 +258,50 @@ ChefStorefrontEvaluation evaluateChefStorefront({
   required Map<String, dynamic>? workingHoursJson,
   DateTime? vacationRangeStart,
   DateTime? vacationRangeEnd,
+  DateTime? freezeUntil,
+  String? freezeType,
   DateTime? now,
 }) {
   final t = now ?? DateTime.now();
+  final fu = freezeUntil;
+  if (fu != null && fu.isAfter(t)) {
+    final ft = freezeType?.trim();
+    final ftNorm = (ft == null || ft.isEmpty) ? null : ft.toLowerCase();
+    _chefAvailLog('-> reason=frozen until=$fu type=$ftNorm');
+    return ChefStorefrontEvaluation(
+      isAcceptingOrders: false,
+      reason: ChefStorefrontReason.frozen,
+      frozenUntil: fu,
+      freezeType: ftNorm,
+    );
+  }
 
-  if (effectiveVacation(
+  final onVacation = effectiveVacation(
     vacationFlag: vacationMode,
     vacationRangeStart: vacationRangeStart,
     vacationRangeEnd: vacationRangeEnd,
     now: t,
-  )) {
-    return const ChefStorefrontEvaluation(
-      isAcceptingOrders: false,
-      reason: ChefStorefrontReason.vacation,
-    );
-  }
-
+  );
   final inHours = isWithinWorkingHours(
     workingHoursJson: workingHoursJson,
     workingHoursStart: workingHoursStart,
     workingHoursEnd: workingHoursEnd,
     now: t,
   );
+  final finalAvailable = !onVacation && inHours && isOnline;
+  _chefAvailLog(
+    'evaluate now=$t isOnVacation=$onVacation vacationMode=$vacationMode '
+    'isWithinWorkingHours=$inHours isOnline=$isOnline '
+    'finalAcceptingOrders=$finalAvailable',
+  );
+
+  if (onVacation) {
+    _chefAvailLog('-> reason=vacation');
+    return const ChefStorefrontEvaluation(
+      isAcceptingOrders: false,
+      reason: ChefStorefrontReason.vacation,
+    );
+  }
 
   if (!inHours) {
     final opens = todaysOpeningTimeLabel(
@@ -221,6 +310,7 @@ ChefStorefrontEvaluation evaluateChefStorefront({
       workingHoursEnd: workingHoursEnd,
       now: t,
     );
+    _chefAvailLog('-> reason=outsideWorkingHours opensAt=$opens');
     return ChefStorefrontEvaluation(
       isAcceptingOrders: false,
       reason: ChefStorefrontReason.outsideWorkingHours,
@@ -229,12 +319,14 @@ ChefStorefrontEvaluation evaluateChefStorefront({
   }
 
   if (!isOnline) {
+    _chefAvailLog('-> reason=offline');
     return const ChefStorefrontEvaluation(
       isAcceptingOrders: false,
       reason: ChefStorefrontReason.offline,
     );
   }
 
+  _chefAvailLog('-> reason=accepting');
   return const ChefStorefrontEvaluation(
     isAcceptingOrders: true,
     reason: ChefStorefrontReason.accepting,

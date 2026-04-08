@@ -22,6 +22,21 @@ final customerBrowseDataSourceProvider = Provider<CustomerBrowseSupabaseDatasour
   return CustomerBrowseSupabaseDatasource();
 });
 
+/// True when the customer must not add items from this kitchen (freeze, offline, vacation, hours, etc.).
+/// Uses the same [ChefDocModel.storefrontEvaluation] rules as browse/checkout.
+final chefOrderingDisabledForCustomerProvider = FutureProvider.family<bool, String>((ref, chefId) async {
+  if (chefId.isEmpty) return true;
+  final doc = await ref.read(customerBrowseDataSourceProvider).fetchChef(chefId);
+  if (doc == null) return true;
+  return !doc.storefrontEvaluation.isAcceptingOrders;
+});
+
+/// Single-kitchen profile for [ChefProfileScreen] (works when the cook is not in the home stream).
+final customerChefProfileProvider = FutureProvider.family<ChefDocModel?, String>((ref, chefId) async {
+  if (chefId.isEmpty) return null;
+  return ref.read(customerBrowseDataSourceProvider).fetchChef(chefId);
+});
+
 final customerOrdersSupabaseDatasourceProvider = Provider<CustomerOrdersSupabaseDatasource>((ref) {
   return CustomerOrdersSupabaseDatasource();
 });
@@ -77,12 +92,15 @@ class CustomerPickupOrigin {
   final String label;
   /// Longer line for header: area · city · region · country.
   final String detailLabel;
+  /// Reverse-geocoded locality used to match [chef_profiles.kitchen_city] (not profile.city).
+  final String? localityCity;
 
   const CustomerPickupOrigin({
     required this.latitude,
     required this.longitude,
     required this.label,
     this.detailLabel = '',
+    this.localityCity,
   });
 
   /// Prefer [detailLabel] for the top bar when set.
@@ -144,6 +162,13 @@ class CartNotifier extends StateNotifier<List<CartItemModel>> {
   }
 
   void clear() => state = [];
+}
+
+/// Quantity already in cart for this menu line ([dishId] + [chefId]), same bucket as [CartNotifier.add].
+int cartQuantityForDishChef(List<CartItemModel> cart, String dishId, String chefId) {
+  return cart
+      .where((e) => e.dishId == dishId && e.chefId == chefId)
+      .fold<int>(0, (s, e) => s + e.quantity);
 }
 
 final cartCountProvider = Provider<int>((ref) {
@@ -228,10 +253,17 @@ final customerChatFirebaseDataSourceProvider = Provider<CustomerChatSupabaseData
 });
 
 // ─── Customer Reels (Supabase reels + reel_likes) ─────────────────────────
-/// Stream of all reels (ordered by created_at desc) with chef name and isLiked for current customer.
+/// Same [CustomerPickupOrigin] as Home — [chefVisibleForHomeAndReels] / [buildHomeSortedChefs]
+/// (e.g. Riyadh pin + locality → Riyadh chefs; Jeddah → Jeddah). Not [profiles.city].
 final reelsStreamProvider = StreamProvider<List<ReelEntity>>((ref) {
   final customerId = ref.watch(customerIdProvider);
-  return ref.watch(customerReelsSupabaseDatasourceProvider).watchReels(customerId);
+  final origin = ref.watch(customerPickupOriginProvider);
+  return ref.watch(customerReelsSupabaseDatasourceProvider).watchReels(
+        customerId,
+        pickupLocalityCity: origin?.localityCity,
+        pickupLat: origin?.latitude,
+        pickupLng: origin?.longitude,
+      );
 });
 
 /// Stream of reel ids the current customer has liked. Use with [reelsStreamProvider] for like state.

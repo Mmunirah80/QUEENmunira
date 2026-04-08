@@ -3,9 +3,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
 import 'package:naham_cook_app/core/utils/supabase_error_message.dart';
+import 'package:naham_cook_app/core/widgets/naham_empty_screens.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
+import 'package:naham_cook_app/features/auth/presentation/providers/auth_provider.dart';
+import 'package:naham_cook_app/features/chat/presentation/chat_composer_policy.dart';
+import 'package:naham_cook_app/features/chat/presentation/widgets/chat_design_tokens.dart';
+import 'package:naham_cook_app/features/chat/presentation/widgets/chat_message_bubble.dart';
+import 'package:naham_cook_app/features/chat/presentation/widgets/chat_message_thread_row.dart';
+import 'package:naham_cook_app/features/chat/presentation/widgets/chat_read_only_banner.dart';
+import 'package:naham_cook_app/features/chat/presentation/widgets/naham_chat_input_bar.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
-import 'package:naham_cook_app/features/customer/widgets/press_scale.dart';
 
 class NahamCustomerChatScreen extends ConsumerStatefulWidget {
   const NahamCustomerChatScreen({super.key});
@@ -125,6 +132,7 @@ class _ConversationList extends ConsumerWidget {
                     builder: (_) => NahamCustomerChatConversationScreen(
                       chatId: id,
                       name: name,
+                      conversationType: type,
                     ),
                   ),
                 ),
@@ -135,26 +143,13 @@ class _ConversationList extends ConsumerWidget {
       },
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, _) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                userFriendlyErrorMessage(e),
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: AppDesignSystem.textSecondary),
-              ),
-              const SizedBox(height: 12),
-              TextButton(
-                onPressed: () {
-                  ref.invalidate(customerChefChatsStreamProvider);
-                  ref.invalidate(customerSupportChatsStreamProvider);
-                },
-                child: const Text('Retry'),
-              ),
-            ],
-          ),
+        child: ErrorStateContent(
+          message: userFriendlyErrorMessage(e),
+          actionLabel: 'Refresh',
+          onRetry: () {
+            ref.invalidate(customerChefChatsStreamProvider);
+            ref.invalidate(customerSupportChatsStreamProvider);
+          },
         ),
       ),
     );
@@ -189,11 +184,14 @@ class _PendingMessage {
 class NahamCustomerChatConversationScreen extends ConsumerStatefulWidget {
   final String chatId;
   final String name;
+  /// `customer-chef` | `customer-support`
+  final String conversationType;
 
   const NahamCustomerChatConversationScreen({
     super.key,
     required this.chatId,
     required this.name,
+    this.conversationType = 'customer-chef',
   });
 
   @override
@@ -260,6 +258,11 @@ class _NahamCustomerChatConversationScreenState extends ConsumerState<NahamCusto
   }
 
   Future<void> _retryPending(String localId) async {
+    if (!ChatComposerPolicy.showComposer(
+      accountMessagingBlocked: ref.read(authStateProvider).valueOrNull?.isBlocked == true,
+    )) {
+      return;
+    }
     final uid = ref.read(customerIdProvider);
     if (uid.isEmpty) return;
     final i = _pending.indexWhere((m) => m.id == localId);
@@ -280,10 +283,77 @@ class _NahamCustomerChatConversationScreenState extends ConsumerState<NahamCusto
     }
   }
 
+  static DateTime? _parseMsgCreatedAt(dynamic raw) {
+    if (raw == null) return null;
+    if (raw is DateTime) return raw;
+    if (raw is String) return DateTime.tryParse(raw);
+    return DateTime.tryParse(raw.toString());
+  }
+
+  /// How many "sending" pendings with the same text precede or equal [p] in FIFO order.
+  int _ordinalAmongSendingSameText(_PendingMessage p) {
+    final same = _pending
+        .where((x) => x.status == _PendingStatus.sending && x.text == p.text)
+        .toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final idx = same.indexOf(p);
+    return idx < 0 ? 0 : idx;
+  }
+
+  /// True when the realtime stream already reflects this pending send (avoids duplicate bubbles).
+  bool _pendingIsEchoedByStream(
+    List<Map<String, dynamic>> messages,
+    String uidTrim,
+    _PendingMessage p,
+  ) {
+    if (p.status != _PendingStatus.sending) return false;
+    final ord = _ordinalAmongSendingSameText(p);
+    var n = 0;
+    for (final m in messages) {
+      final sid = (m['senderId'] as String? ?? '').trim();
+      if (sid != uidTrim) continue;
+      final content = (m['content'] as String? ?? '').trim();
+      if (content != p.text) continue;
+      final at = _parseMsgCreatedAt(m['createdAt']);
+      if (at == null) {
+        n++;
+        continue;
+      }
+      if (at.isBefore(p.createdAt.subtract(const Duration(seconds: 5)))) continue;
+      n++;
+    }
+    return n > ord;
+  }
+
   @override
   Widget build(BuildContext context) {
     final uid = ref.watch(customerIdProvider);
+    final uidTrim = uid.trim();
+    final authUser = ref.watch(authStateProvider).valueOrNull;
+    final customerName = authUser?.name.trim() ?? '';
+    final accountBlocked = authUser?.isBlocked == true;
+    final showComposer = ChatComposerPolicy.showComposer(
+      accountMessagingBlocked: accountBlocked,
+    );
+    final isSupportThread = widget.conversationType == 'customer-support';
     final messagesAsync = ref.watch(customerChatMessagesStreamProvider(widget.chatId));
+
+    ref.listen(customerChatMessagesStreamProvider(widget.chatId), (previous, next) {
+      if (!next.hasValue) return;
+      final messages = next.requireValue;
+      if (!mounted) return;
+      final u = ref.read(customerIdProvider).trim();
+      final removeIds = _pending
+          .where(
+            (p) =>
+                p.status == _PendingStatus.sending &&
+                _pendingIsEchoedByStream(messages, u, p),
+          )
+          .map((p) => p.id)
+          .toList();
+      if (removeIds.isEmpty) return;
+      setState(() => _pending.removeWhere((x) => removeIds.contains(x.id)));
+    });
 
     return Scaffold(
       backgroundColor: AppDesignSystem.backgroundOffWhite,
@@ -294,6 +364,10 @@ class _NahamCustomerChatConversationScreenState extends ConsumerState<NahamCusto
       ),
       body: Column(
         children: [
+          if (!showComposer)
+            const ChatReadOnlyBanner(
+              message: "Your account can't send messages right now.",
+            ),
           if (_pending.any((m) => m.status == _PendingStatus.failed))
             Container(
               width: double.infinity,
@@ -307,30 +381,56 @@ class _NahamCustomerChatConversationScreenState extends ConsumerState<NahamCusto
           Expanded(
             child: messagesAsync.when(
               data: (messages) {
-                final items = <Widget>[];
+                final entries = <({DateTime sortAt, Widget child})>[];
                 for (final m in messages) {
-                  final isMe = (m['senderId'] as String? ?? '') == uid;
-                  items.add(
-                    _MessageBubble(
+                  final sid = (m['senderId'] as String? ?? '').trim();
+                  final isMe = sid.isNotEmpty && sid == uidTrim;
+                  final tone = _tone(isMe: isMe, isSupportThread: isSupportThread);
+                  final senderLabel = _participantLabel(
+                    isMe: isMe,
+                    customerName: customerName,
+                    isSupportThread: isSupportThread,
+                  );
+                  final sortAt = _parseMsgCreatedAt(m['createdAt']) ?? DateTime.fromMillisecondsSinceEpoch(0);
+                  entries.add((
+                    sortAt: sortAt,
+                    child: ChatMessageThreadRow(
+                      roleLabel: senderLabel,
+                      tone: tone,
+                      alignEnd: isMe,
                       text: m['content'] as String? ?? '',
-                      isMe: isMe,
                       timeLabel: _formatTime(m['createdAt']),
                     ),
-                  );
+                  ));
                 }
                 for (final p in _pending) {
-                  items.add(
-                    _MessageBubble(
+                  if (p.status == _PendingStatus.sending &&
+                      _pendingIsEchoedByStream(messages, uidTrim, p)) {
+                    continue;
+                  }
+                  entries.add((
+                    sortAt: p.createdAt,
+                    child: ChatMessageThreadRow(
+                      roleLabel: _participantLabel(
+                        isMe: true,
+                        customerName: customerName,
+                        isSupportThread: isSupportThread,
+                      ),
+                      tone: ChatBubbleTone.outgoing,
+                      alignEnd: true,
                       text: p.text,
-                      isMe: true,
                       timeLabel: _time(p.createdAt),
-                      pendingStatus: p.status,
-                      onRetry: p.status == _PendingStatus.failed
+                      sendState: p.status == _PendingStatus.sending
+                          ? ChatOutgoingSendState.sending
+                          : ChatOutgoingSendState.failed,
+                      onRetryFailed: p.status == _PendingStatus.failed
                           ? () => _retryPending(p.id)
                           : null,
                     ),
-                  );
+                  ));
                 }
+                entries.sort((a, b) => a.sortAt.compareTo(b.sortAt));
+                final items = entries.map((e) => e.child).toList();
 
                 if (items.isEmpty) {
                   return const Center(
@@ -342,7 +442,7 @@ class _NahamCustomerChatConversationScreenState extends ConsumerState<NahamCusto
                 }
                 return ListView(
                   controller: _scrollCtrl,
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(ChatDesignTokens.listHorizontalPadding),
                   children: items,
                 );
               },
@@ -355,48 +455,12 @@ class _NahamCustomerChatConversationScreenState extends ConsumerState<NahamCusto
               ),
             ),
           ),
-          Container(
-            padding: EdgeInsets.fromLTRB(16, 10, 16, MediaQuery.of(context).padding.bottom + 10),
-            color: Colors.white,
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _ctrl,
-                    enabled: !_sending,
-                    decoration: InputDecoration(
-                      hintText: 'Type a message...',
-                      filled: true,
-                      fillColor: AppDesignSystem.backgroundOffWhite,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none,
-                      ),
-                    ),
-                    onSubmitted: (_) => _send(),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: _sending ? null : _send,
-                  child: PressScale(
-                    enabled: !_sending,
-                    child: CircleAvatar(
-                      radius: 22,
-                      backgroundColor: AppDesignSystem.primary,
-                      child: _sending
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                            )
-                          : const Icon(Icons.send_rounded, color: Colors.white),
-                    ),
-                  ),
-                ),
-              ],
+          if (showComposer)
+            NahamChatInputBar(
+              controller: _ctrl,
+              sending: _sending,
+              onSend: _send,
             ),
-          ),
         ],
       ),
     );
@@ -413,71 +477,28 @@ class _NahamCustomerChatConversationScreenState extends ConsumerState<NahamCusto
   static String _time(DateTime d) {
     return '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   }
-}
 
-class _MessageBubble extends StatelessWidget {
-  final String text;
-  final bool isMe;
-  final String timeLabel;
-  final _PendingStatus? pendingStatus;
-  final VoidCallback? onRetry;
+  static ChatBubbleTone _tone({
+    required bool isMe,
+    required bool isSupportThread,
+  }) {
+    if (isMe) return ChatBubbleTone.outgoing;
+    if (isSupportThread) return ChatBubbleTone.support;
+    return ChatBubbleTone.incoming;
+  }
 
-  const _MessageBubble({
-    required this.text,
-    required this.isMe,
-    required this.timeLabel,
-    this.pendingStatus,
-    this.onRetry,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final bg = isMe ? AppDesignSystem.primary : Colors.white;
-    final fg = isMe ? Colors.white : AppDesignSystem.textPrimary;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-        children: [
-          Flexible(
-            child: Column(
-              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: bg,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Text(text, style: TextStyle(color: fg)),
-                ),
-                const SizedBox(height: 3),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(timeLabel, style: const TextStyle(fontSize: 11, color: AppDesignSystem.textSecondary)),
-                    if (pendingStatus == _PendingStatus.sending) ...[
-                      const SizedBox(width: 6),
-                      const Text('sending...', style: TextStyle(fontSize: 11, color: AppDesignSystem.textSecondary)),
-                    ],
-                    if (pendingStatus == _PendingStatus.failed) ...[
-                      const SizedBox(width: 6),
-                      InkWell(
-                        onTap: onRetry,
-                        child: const Text(
-                          'failed - retry',
-                          style: TextStyle(fontSize: 11, color: Colors.red),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+  /// Display name for the message row (customer name vs kitchen vs Support).
+  String _participantLabel({
+    required bool isMe,
+    required String customerName,
+    required bool isSupportThread,
+  }) {
+    if (isMe) {
+      final n = customerName.trim();
+      return n.isNotEmpty ? n : 'You';
+    }
+    if (isSupportThread) return 'Support';
+    final peer = widget.name.trim();
+    return peer.isNotEmpty ? peer : 'Cook';
   }
 }
-

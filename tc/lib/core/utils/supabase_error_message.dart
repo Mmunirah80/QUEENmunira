@@ -19,6 +19,9 @@ String userFriendlyErrorMessage(Object error, {String fallback = 'Something went
       has('handshake')) {
     return 'Network problem — check your connection and try again.';
   }
+  if (has('database error querying schema') || has('querying schema')) {
+    return 'Server data setup mismatch (profiles). Check Supabase columns/RLS match the app, then restart the app.';
+  }
   if (has('jwt') || has('401') || has('unauthorized') || has('session') || has('not authenticated')) {
     return 'Session expired — sign out and sign in again.';
   }
@@ -27,10 +30,12 @@ String userFriendlyErrorMessage(Object error, {String fallback = 'Something went
   if (text.startsWith('Exception: ')) {
     text = text.substring(11);
   }
-  if (text.length <= 140) {
+  // SnackBars: allow full app-thrown messages (e.g. Auth server/schema errors); cap very long noise.
+  const maxLen = 420;
+  if (text.length <= maxLen) {
     return text;
   }
-  return fallback;
+  return '${text.substring(0, maxLen - 1)}…';
 }
 
 String _fromPostgrest(PostgrestException e, {required String fallback}) {
@@ -62,6 +67,10 @@ String _fromPostgrest(PostgrestException e, {required String fallback}) {
   if (code == '406' || (combined.contains('multiple') && combined.contains('rows'))) {
     return 'Data mismatch on server (duplicate records). Try again; if it continues, contact support.';
   }
+  if (combined.contains('database error querying schema') ||
+      combined.contains('querying schema')) {
+    return 'Server data setup mismatch (profiles). Check Supabase columns/RLS match the app, then restart the app.';
+  }
   if (combined.contains('transition') ||
       combined.contains('invalid status') ||
       combined.contains('order_status') ||
@@ -75,4 +84,32 @@ String _fromPostgrest(PostgrestException e, {required String fallback}) {
     return message;
   }
   return fallback;
+}
+
+/// Admin inspection pool / `start_inspection_call` — short copy for SnackBars.
+String adminInspectionFriendlyError(Object error) {
+  final base = userFriendlyErrorMessage(error);
+  final m = base.toLowerCase();
+  if (m.contains('frozen') || m.contains('freeze_until')) {
+    return 'Cannot start inspection: cook is frozen. Unfreeze or wait until the freeze ends.';
+  }
+  if (m.contains('vacation')) {
+    return 'Cannot start inspection: cook is on vacation.';
+  }
+  if (m.contains('suspended') || m.contains('suspend')) {
+    return 'Cannot start inspection: cook account is suspended.';
+  }
+  if (m.contains('blocked') || m.contains('is_blocked')) {
+    return 'Cannot start inspection: cook account is blocked.';
+  }
+  if (m.contains('not online') || m.contains('offline') || m.contains('is_online')) {
+    return 'Cannot start inspection: cook must be online and available.';
+  }
+  if (m.contains('duplicate') || (m.contains('already') && m.contains('call'))) {
+    return 'Cannot start inspection: an inspection call may already be open for this cook.';
+  }
+  if (m.contains('no eligible')) {
+    return 'No eligible cooks right now. Chefs must be approved, online, in working hours, not frozen, and past the inspection cooldown.';
+  }
+  return base.length > 200 ? '${base.substring(0, 197)}…' : base;
 }

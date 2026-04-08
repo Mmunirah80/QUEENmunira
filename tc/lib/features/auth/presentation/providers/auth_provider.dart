@@ -1,8 +1,10 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../core/debug/debug_auth_bypass.dart';
 import '../../../../core/storage/auth_storage.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../data/chef_reg_draft_storage.dart';
@@ -29,10 +31,19 @@ final signupUseCaseProvider = Provider<SignupUseCase>((ref) {
 /// Role selected on role-selection screen; passed into login so user gets correct role.
 final selectedRoleProvider = StateProvider<AppRole?>((ref) => null);
 
+/// Debug bypass only: switch mock persona ([authBypassIsOn]). No effect in release.
+final debugAuthRoleProvider = StateProvider<DebugRole>((ref) => DebugRole.chef);
+
+/// Debug bypass: Supabase-facing user UUID for the active mock role (`sender_id`, order ownership checks).
+/// `null` when [authBypassIsOn] is false — use [SupabaseClient.auth] instead.
+final debugBypassSupabaseUserIdProvider = Provider<String?>((ref) {
+  if (!authBypassIsOn) return null;
+  return DebugAuthBypass.userModel(ref.watch(debugAuthRoleProvider)).id;
+});
+
 final authStateProvider = StateNotifierProvider<AuthNotifier, AsyncValue<UserEntity?>>((ref) {
-  final notifier = AuthNotifier(ref.watch(authRepositoryProvider), ref);
-  ref.onDispose(() => notifier.dispose());
-  return notifier;
+  // Do not call notifier.dispose() in ref.onDispose — StateNotifierProvider disposes the notifier once.
+  return AuthNotifier(ref.watch(authRepositoryProvider), ref);
 });
 
 /// Draft data from chef registration step 1 (account); used by step 2 (documents).
@@ -49,14 +60,31 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserEntity?>> {
   RealtimeChannel? _blockChannel;
   RealtimeChannel? _chefProfileChannel;
 
-  AuthNotifier(this.repository, this._ref) : super(const AsyncValue.loading()) {
+  AuthNotifier(this.repository, this._ref)
+      : super(
+          authBypassIsOn
+              ? AsyncValue.data(
+                  DebugAuthBypass.userModel(_ref.read(debugAuthRoleProvider)),
+                )
+              : const AsyncValue.loading(),
+        ) {
+    if (authBypassIsOn) {
+      DebugAuthBypass.setRole(_ref.read(debugAuthRoleProvider));
+      _ref.listen<DebugRole>(debugAuthRoleProvider, (_, next) {
+        DebugAuthBypass.setRole(next);
+        state = AsyncValue.data(DebugAuthBypass.userModel(next));
+      });
+      return;
+    }
+
     _checkAuthStatus();
     _authSub = repository.watchAuthState().listen((_) async {
       try {
         final user = await repository.getCurrentUser();
         state = AsyncValue.data(user);
         _syncRealtimeChannels(user);
-      } catch (_) {
+      } catch (e, st) {
+        debugPrint('[AUTH] watchAuthState refresh failed: $e\n$st');
         state = const AsyncValue.data(null);
         _syncRealtimeChannels(null);
       }
@@ -83,13 +111,11 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserEntity?>> {
         value: uid,
       ),
       callback: (payload) async {
-        final rec = payload.newRecord;
-        if (rec['is_blocked'] == true) {
-          try {
-            final u = await repository.getCurrentUser();
-            state = AsyncValue.data(u);
-          } catch (_) {}
-        }
+        // Refresh on any profiles row change (block, unblock, name, etc.).
+        try {
+          final u = await repository.getCurrentUser();
+          state = AsyncValue.data(u);
+        } catch (_) {}
       },
     );
     _blockChannel!.subscribe();
@@ -129,6 +155,11 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserEntity?>> {
 
   /// Refetch session user (e.g. after profile row changes).
   Future<void> refreshUser() async {
+    if (authBypassIsOn) {
+      final user = DebugAuthBypass.userModel();
+      state = AsyncValue.data(user);
+      return;
+    }
     try {
       final user = await repository.getCurrentUser();
       state = AsyncValue.data(user);
@@ -140,6 +171,12 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserEntity?>> {
   }
 
   Future<void> login(String email, String password, [AppRole? role]) async {
+    if (authBypassIsOn) {
+      final user = DebugAuthBypass.userModel();
+      state = AsyncValue.data(user);
+      await AuthStorage.setLoggedIn(true);
+      return;
+    }
     state = const AsyncValue.loading();
     try {
       final useCase = LoginUseCase(repository);
@@ -148,8 +185,10 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserEntity?>> {
       _syncRealtimeChannels(user);
       await AuthStorage.setLoggedIn(true);
     } catch (e, stackTrace) {
-      state = AsyncValue.error(e, stackTrace);
-      rethrow;
+      // Keep router on AsyncData(null), not AsyncError — avoids redirect/error churn after a bad password.
+      state = const AsyncValue.data(null);
+      _syncRealtimeChannels(null);
+      Error.throwWithStackTrace(e, stackTrace);
     }
   }
 
@@ -160,6 +199,12 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserEntity?>> {
     String? phone,
     AppRole? role,
   }) async {
+    if (authBypassIsOn) {
+      final user = DebugAuthBypass.userModel();
+      state = AsyncValue.data(user);
+      await AuthStorage.setLoggedIn(true);
+      return;
+    }
     state = const AsyncValue.loading();
     try {
       final useCase = SignupUseCase(repository);
@@ -174,12 +219,21 @@ class AuthNotifier extends StateNotifier<AsyncValue<UserEntity?>> {
       _syncRealtimeChannels(user);
       await AuthStorage.setLoggedIn(true);
     } catch (e, stackTrace) {
-      state = AsyncValue.error(e, stackTrace);
-      rethrow;
+      state = const AsyncValue.data(null);
+      _syncRealtimeChannels(null);
+      Error.throwWithStackTrace(e, stackTrace);
     }
   }
 
   Future<void> logout() async {
+    if (authBypassIsOn) {
+      _syncRealtimeChannels(null);
+      await ChefRegDraftStorage.clear();
+      _ref.read(chefRegDraftProvider.notifier).state = null;
+      await AuthStorage.setLoggedIn(false);
+      state = const AsyncValue.data(null);
+      return;
+    }
     try {
       _syncRealtimeChannels(null);
       await ChefRegDraftStorage.clear();

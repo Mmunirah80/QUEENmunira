@@ -19,10 +19,18 @@ class OrderEntity extends Equatable {
   final String? chefName;
   final List<OrderItemEntity> items;
   final double totalAmount;
+  /// Stored commission (from `orders.commission_amount`); null if column absent in row.
+  final double? commissionAmount;
   final OrderStatus status;
+  /// Raw `orders.status` from Postgres (e.g. `cancelled` or legacy `cancelled_by_system`).
+  final String? dbStatus;
+  /// Internal `orders.cancel_reason` (never show raw strings to customers; use [OrderDbStatus] mappers).
+  final String? cancelReason;
   final DateTime createdAt;
   final String? deliveryAddress;
   final String? notes;
+  /// Client idempotency key from `orders.idempotency_key` when present.
+  final String? idempotencyKey;
 
   const OrderEntity({
     required this.id,
@@ -33,10 +41,14 @@ class OrderEntity extends Equatable {
     this.chefName,
     required this.items,
     required this.totalAmount,
+    this.commissionAmount,
     required this.status,
+    this.dbStatus,
+    this.cancelReason,
     required this.createdAt,
     this.deliveryAddress,
     this.notes,
+    this.idempotencyKey,
   });
 
   @override
@@ -49,10 +61,14 @@ class OrderEntity extends Equatable {
         chefName,
         items,
         totalAmount,
+        commissionAmount,
         status,
+        dbStatus,
+        cancelReason,
         createdAt,
         deliveryAddress,
         notes,
+        idempotencyKey,
       ];
 }
 

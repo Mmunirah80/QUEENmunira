@@ -1,3 +1,4 @@
+import '../../data/order_db_status.dart';
 import '../../domain/entities/order_entity.dart';
 
 /// Maps [OrderEntity] to the UI map shape used by order cards and order details.
@@ -5,7 +6,8 @@ import '../../domain/entities/order_entity.dart';
 class OrderUiMapper {
   OrderUiMapper._();
 
-  /// Safe short id for list cards (empty or short ids do not throw).
+  /// First 8 characters of [id] for compact labels (e.g. `#a1b2c3d4`).
+  /// Not globally unique; the full UUID from Supabase is the canonical order id.
   static String shortOrderId(String id) {
     final t = id.trim();
     if (t.isEmpty) return '—';
@@ -81,7 +83,11 @@ class OrderUiMapper {
       'customer': order.customerName,
       'items': itemsString(order),
       'amount': order.totalAmount,
-      'status': 'Cancelled',
+      'status': OrderDbStatus.customerFacingLabel(
+        order.dbStatus,
+        cancelReason: order.cancelReason,
+        orderStatusFallback: order.status,
+      ),
     };
   }
 

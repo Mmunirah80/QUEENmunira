@@ -417,6 +417,7 @@ class _OrdersScreenState extends ConsumerState<OrdersScreen>
   }
 
   Future<void> _accept(String orderId) async {
+    if (_statusUpdatingOrderIds.contains(orderId)) return;
     try {
       setState(() => _statusUpdatingOrderIds.add(orderId));
       await ref.read(ordersRepositoryProvider).acceptOrder(orderId);
@@ -435,6 +436,7 @@ class _OrdersScreenState extends ConsumerState<OrdersScreen>
   }
 
   Future<void> _showRejectReasons(BuildContext context, String orderId) async {
+    if (_statusUpdatingOrderIds.contains(orderId)) return;
     final reason = await showRejectReasonSheet(context);
     if (reason == null || !mounted) return;
     try {
@@ -562,15 +564,29 @@ class _OrderCard extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          order.id,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w800,
-                            color: _NC.text,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '#${OrderUiMapper.shortOrderId(order.id)}',
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                color: _NC.text,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if (order.id.trim().isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                order.id,
+                                style: const TextStyle(fontSize: 11, color: _NC.textSub, height: 1.2),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ],
                         ),
                       ),
                       const SizedBox(width: 8),

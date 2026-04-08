@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import '../../../../core/constants/app_constants.dart';
 import '../models/reel_model.dart';
@@ -115,6 +116,35 @@ class ReelsMockDataSource implements ReelsRemoteDataSource {
       chefName: _currentCookName,
       kitchenName: 'مطبخي',
       videoUrl: 'https://example.com/uploaded.mp4',
+      description: description,
+      dishId: dishId,
+      dishName: null,
+      tags: tags,
+      likesCount: 0,
+      likedBy: [],
+      commentsCount: 0,
+      createdAt: DateTime.now(),
+      isLiked: false,
+    );
+    _reels.insert(0, reel);
+    return reel;
+  }
+
+  @override
+  Future<ReelModel> uploadReelFromBytes(
+    Uint8List videoBytes, {
+    required String filename,
+    required String description,
+    required List<String> tags,
+    String? dishId,
+  }) async {
+    await Future<void>.delayed(const Duration(seconds: 2));
+    final reel = ReelModel(
+      id: 'reel_${DateTime.now().millisecondsSinceEpoch}',
+      chefId: _currentCookId,
+      chefName: _currentCookName,
+      kitchenName: 'مطبخي',
+      videoUrl: 'https://example.com/uploaded_bytes.mp4',
       description: description,
       dishId: dishId,
       dishName: null,

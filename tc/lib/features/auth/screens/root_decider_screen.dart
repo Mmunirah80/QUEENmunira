@@ -58,7 +58,7 @@ class _RootDeciderScreenState extends ConsumerState<RootDeciderScreen> {
       context.go(RouteNames.customerRoot);
       return;
     }
-    if (user.isChefApproved || user.isChefPending || user.isChefRejected) {
+    if (user.isChef) {
       context.go(RouteNames.chefHome);
       return;
     }

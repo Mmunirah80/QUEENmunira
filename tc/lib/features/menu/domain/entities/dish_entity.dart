@@ -8,7 +8,8 @@ class DishEntity extends Equatable {
   final String? imageUrl;
   final List<String> categories;
   final bool isAvailable;
-  final int preparationTime; // in minutes
+  /// Matches `menu_items.daily_quantity` (planned portions for the day), same as cook menu — not clock minutes.
+  final int preparationTime;
   /// Remaining quantity for this dish for the current day/capacity window.
   /// Used by customers to prevent ordering beyond Cook's daily capacity.
   final int remainingQuantity;

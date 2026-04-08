@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../../../core/menu/naham_menu_categories.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../domain/entities/dish_entity.dart';
 import '../models/dish_model.dart';
@@ -16,11 +18,11 @@ class MenuSupabaseDataSource implements MenuRemoteDataSource {
   SupabaseClient get _sb => SupabaseConfig.client;
 
   static DishModel _dishFromRow(Map<String, dynamic> r) {
-    final cat = r['category'] as String? ?? '';
-    final categories = cat.isNotEmpty ? [cat] : <String>[];
+    final cat = NahamMenuCategories.normalizeDishCategory(r['category'] as String?);
+    final categories = <String>[cat];
     final daily = (r['daily_quantity'] as num?)?.toInt() ?? 0;
     final remRaw = r['remaining_quantity'];
-    final remaining = remRaw is num ? remRaw.toInt() : daily;
+    final remaining = remRaw is num ? remRaw.toInt() : 0;
     return DishModel(
       id: r['id'] as String,
       name: r['name'] as String? ?? '',
@@ -49,7 +51,19 @@ class MenuSupabaseDataSource implements MenuRemoteDataSource {
         .from('menu_items')
         .stream(primaryKey: ['id'])
         .eq('chef_id', chefId)
-        .map((rows) => rows.map(_dishFromRow).toList());
+        .map((rows) {
+          final out = <DishEntity>[];
+          for (final raw in rows) {
+            try {
+              out.add(
+                _dishFromRow(Map<String, dynamic>.from(raw as Map)),
+              );
+            } catch (e, st) {
+              debugPrint('[watchChefDishes] row parse error: $e\n$st');
+            }
+          }
+          return out;
+        });
   }
 
   @override
@@ -69,7 +83,11 @@ class MenuSupabaseDataSource implements MenuRemoteDataSource {
   @override
   Future<DishModel> createDish(DishModel dish) async {
     final uuid = dish.id.isEmpty ? const Uuid().v4() : dish.id;
-    final category = dish.categories.isNotEmpty ? dish.categories.first : 'Other';
+    final category = NahamMenuCategories.normalizeDishCategory(
+      dish.categories.isNotEmpty ? dish.categories.first : null,
+    );
+    final daily = dish.preparationTime < 0 ? 0 : dish.preparationTime;
+    final remaining = dish.remainingQuantity < 0 ? 0 : dish.remainingQuantity;
     await _sb.from('menu_items').insert({
       'id': uuid,
       'chef_id': chefId,
@@ -78,8 +96,8 @@ class MenuSupabaseDataSource implements MenuRemoteDataSource {
       'price': dish.price,
       'image_url': dish.imageUrl,
       'category': category,
-      'daily_quantity': dish.preparationTime,
-      'remaining_quantity': 99,
+      'daily_quantity': daily,
+      'remaining_quantity': remaining,
       'is_available': dish.isAvailable,
       'created_at': dish.createdAt.toUtc().toIso8601String(),
     });
@@ -88,14 +106,19 @@ class MenuSupabaseDataSource implements MenuRemoteDataSource {
 
   @override
   Future<DishModel> updateDish(DishModel dish) async {
-    final category = dish.categories.isNotEmpty ? dish.categories.first : 'Other';
+    final category = NahamMenuCategories.normalizeDishCategory(
+      dish.categories.isNotEmpty ? dish.categories.first : null,
+    );
+    final daily = dish.preparationTime < 0 ? 0 : dish.preparationTime;
+    final remaining = dish.remainingQuantity < 0 ? 0 : dish.remainingQuantity;
     await _sb.from('menu_items').update({
       'name': dish.name,
       'description': dish.description,
       'price': dish.price,
       'image_url': dish.imageUrl,
       'category': category,
-      'daily_quantity': dish.preparationTime,
+      'daily_quantity': daily,
+      'remaining_quantity': remaining,
       'is_available': dish.isAvailable,
     }).eq('id', dish.id).eq('chef_id', chefId);
     return getDishById(dish.id);

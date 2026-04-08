@@ -19,6 +19,8 @@ class ReelEntity extends Equatable {
   final int commentsCount;
   final DateTime createdAt;
   final bool isLiked;
+  /// Customer ordering from this reel is disabled (e.g. chef account frozen by admin).
+  final bool chefOrderingDisabled;
 
   const ReelEntity({
     required this.id,
@@ -37,6 +39,7 @@ class ReelEntity extends Equatable {
     this.commentsCount = 0,
     required this.createdAt,
     this.isLiked = false,
+    this.chefOrderingDisabled = false,
   });
 
   /// Backward compatibility: cookId = chefId.
@@ -64,5 +67,6 @@ class ReelEntity extends Equatable {
         commentsCount,
         createdAt,
         isLiked,
+        chefOrderingDisabled,
       ];
 }

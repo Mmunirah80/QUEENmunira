@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../core/supabase/supabase_config.dart';
 import '../../../auth/domain/entities/user_entity.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../data/datasources/orders_mock_remote_datasource.dart';
@@ -26,9 +26,13 @@ bool _isChefCookSession(UserEntity? user, AppRole? selectedLoginRole) {
 final ordersRepositoryProvider = Provider<OrdersRepository>((ref) {
   final user = ref.watch(authStateProvider).valueOrNull;
   final selectedLoginRole = ref.watch(selectedRoleProvider);
-  final chefId =
-      _isChefCookSession(user, selectedLoginRole) ? user!.id : null;
-  final customerId = user?.isCustomer == true ? user!.id : null;
+  final chefId = (user != null &&
+          user.id.isNotEmpty &&
+          _isChefCookSession(user, selectedLoginRole))
+      ? user.id
+      : null;
+  final customerId =
+      (user != null && user.isCustomer) ? user.id : null;
 
   if (kDebugMode &&
       _kCookMockOrders &&
@@ -133,8 +137,11 @@ final chefCancelledOrdersStreamProvider = StreamProvider<List<OrderEntity>>((ref
 final chefTodayStatsProvider = FutureProvider<ChefTodayStats>((ref) async {
   final user = ref.watch(authStateProvider).valueOrNull;
   final selectedLoginRole = ref.watch(selectedRoleProvider);
-  final chefId =
-      _isChefCookSession(user, selectedLoginRole) ? user!.id : null;
+  final chefId = (user != null &&
+          user.id.isNotEmpty &&
+          _isChefCookSession(user, selectedLoginRole))
+      ? user.id
+      : null;
   if (chefId == null || chefId.isEmpty) {
     return const ChefTodayStats(
       completedRevenueToday: 0,
@@ -144,12 +151,29 @@ final chefTodayStatsProvider = FutureProvider<ChefTodayStats>((ref) async {
     );
   }
 
-  return ref.watch(ordersRepositoryProvider).getTodayStats();
+  try {
+    return await ref.watch(ordersRepositoryProvider).getTodayStats();
+  } catch (e, st) {
+    debugPrint('[chefTodayStatsProvider] $e\n$st');
+    return const ChefTodayStats(
+      completedRevenueToday: 0,
+      completedOrdersToday: 0,
+      inKitchenCountToday: 0,
+      pipelineOrderValueToday: 0,
+    );
+  }
 });
 
 /// Delayed orders (e.g. > 30 min) for badge/quick action.
 final chefDelayedOrdersProvider = FutureProvider<List<OrderEntity>>((ref) async {
-  return ref.watch(ordersRepositoryProvider).getDelayedOrders(const Duration(minutes: 30));
+  try {
+    return await ref
+        .watch(ordersRepositoryProvider)
+        .getDelayedOrders(const Duration(minutes: 30));
+  } catch (e, st) {
+    debugPrint('[chefDelayedOrdersProvider] $e\n$st');
+    return const [];
+  }
 });
 
 /// Earnings summary for chef (last 30 days completed orders: total + last 7 days daily).
@@ -162,13 +186,14 @@ final chefEarningsSummaryProvider = FutureProvider<({double totalEarnings, int t
 final chefMonthlyInsightsProvider = FutureProvider<
     ({double monthEarnings, int monthOrders, String topDish, double acceptanceRate})>((ref) async {
   final user = ref.watch(authStateProvider).valueOrNull;
-  final chefId = user?.isChef == true ? user!.id : null;
+  final chefId =
+      (user != null && user.isChef && user.id.isNotEmpty) ? user.id : null;
   if (chefId == null || chefId.isEmpty) {
     return (monthEarnings: 0.0, monthOrders: 0, topDish: '—', acceptanceRate: 0.0);
   }
 
   try {
-    final client = Supabase.instance.client;
+    final client = SupabaseConfig.dataClient;
     final now = DateTime.now().toUtc();
     final startOfMonth = DateTime.utc(now.year, now.month, 1);
 

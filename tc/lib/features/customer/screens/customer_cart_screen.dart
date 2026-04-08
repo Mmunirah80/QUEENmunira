@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:naham_cook_app/core/theme/app_design_system.dart';
 import 'package:naham_cook_app/core/supabase/supabase_config.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
+import 'package:naham_cook_app/features/customer/constants/customer_checkout_constants.dart';
 import 'package:naham_cook_app/features/customer/data/models/cart_item_model.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_payment_screen.dart';
@@ -19,8 +20,6 @@ class _C {
   static const text = AppDesignSystem.textPrimary;
   static const textSub = AppDesignSystem.textSecondary;
 }
-
-const double _commissionRate = 0.10;
 
 class NahamCustomerCartScreen extends ConsumerStatefulWidget {
   const NahamCustomerCartScreen({super.key});
@@ -75,7 +74,7 @@ class _NahamCustomerCartScreenState extends ConsumerState<NahamCustomerCartScree
     final cart = ref.watch(cartProvider);
     final pickupOrigin = ref.watch(customerPickupOriginProvider);
     final subtotal = ref.watch(cartSubtotalProvider);
-    final commission = subtotal * _commissionRate;
+    final commission = subtotal * kCustomerCheckoutCommissionRate;
     final total = subtotal + commission;
 
     return Scaffold(
@@ -88,6 +87,32 @@ class _NahamCustomerCartScreenState extends ConsumerState<NahamCustomerCartScree
           icon: const Icon(Icons.arrow_back_ios_new_rounded),
           onPressed: () => Navigator.of(context).pop(),
         ),
+        actions: [
+          if (cart.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.delete_outline_rounded),
+              tooltip: 'Clear cart',
+              onPressed: () async {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Clear cart?'),
+                    content: const Text('Remove all items from your cart.'),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('Clear'),
+                      ),
+                    ],
+                  ),
+                );
+                if (ok == true && context.mounted) {
+                  ref.read(cartProvider.notifier).clear();
+                }
+              },
+            ),
+        ],
       ),
       body: cart.isEmpty
           ? _EmptyCart()

@@ -10,17 +10,19 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/chef/chef_availability.dart';
 import '../../../core/constants/route_names.dart';
+import '../../../core/validation/naham_validators.dart';
 import '../../../core/theme/app_design_system.dart';
+import '../../auth/domain/entities/user_entity.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../../core/supabase/supabase_config.dart';
 import '../../../core/utils/supabase_error_message.dart';
 import '../../../core/widgets/loading_widget.dart';
 import '../../auth/presentation/providers/auth_provider.dart';
-import '../../notifications/presentation/providers/notifications_provider.dart';
 import '../data/models/chef_doc_model.dart';
 import '../presentation/providers/chef_providers.dart';
-import '../dev/cook_dev_review.dart';
+import '../presentation/widgets/cook_freeze_banner.dart';
 import 'bank_account_screen.dart';
 import '_time_chip.dart';
 import 'earnings_screen.dart';
@@ -30,7 +32,6 @@ import 'package:latlong2/latlong.dart';
 
 class _C {
   static const primary = AppDesignSystem.primary;
-  static const primaryDark = AppDesignSystem.primaryDark;
   static const primaryLight = AppDesignSystem.primaryLight;
   static const bg = AppDesignSystem.backgroundOffWhite;
   static const surface = AppDesignSystem.cardWhite;
@@ -46,137 +47,6 @@ class ProfileScreen extends ConsumerStatefulWidget {
 }
 
 class _ProfileScreenState extends ConsumerState<ProfileScreen> {
-  bool _devSimulateBusy = false;
-
-  Future<void> _afterSimulateRefresh() async {
-    await ref.read(authStateProvider.notifier).refreshUser();
-    ref.invalidate(chefDocStreamProvider);
-    ref.invalidate(chefNotificationsProvider);
-  }
-
-  Future<void> _runSimulateApprove() async {
-    if (_devSimulateBusy) return;
-    setState(() => _devSimulateBusy = true);
-    try {
-      await CookDevReview.simulateApprove();
-      await _afterSimulateRefresh();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Simulate approve: same RPC as admin (check Notifications + Support chat).')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(userFriendlyErrorMessage(e)),
-            backgroundColor: AppDesignSystem.errorRed,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _devSimulateBusy = false);
-    }
-  }
-
-  Future<void> _runSimulateReject() async {
-    if (_devSimulateBusy) return;
-    final reason = await showDialog<String>(
-      context: context,
-      builder: (ctx) => const _SimulateChefRejectReasonDialog(),
-    );
-    if (reason == null || reason.isEmpty) return;
-    setState(() => _devSimulateBusy = true);
-    try {
-      await CookDevReview.simulateReject(reason: reason);
-      await _afterSimulateRefresh();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Simulate reject: same RPC as admin (check Notifications + Support chat).')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(userFriendlyErrorMessage(e)),
-            backgroundColor: AppDesignSystem.errorRed,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _devSimulateBusy = false);
-    }
-  }
-
-  Widget _buildDevSimulateSection() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFF7ED),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFF59E0B)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.science_outlined, size: 20, color: Color(0xFFB45309)),
-              SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'Simulation mode: document review (temporary)',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 13,
-                    color: Color(0xFF92400E),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Calls apply_chef_document_review — the same RPC as the admin panel (notifications + Support chat).\n'
-            'Run supabase_apply_chef_document_review.sql, then enable DB flag:\n'
-            'UPDATE dev_feature_flags SET enabled = true WHERE key = \'chef_document_review_simulation\';\n'
-            'Use for QA only; disable flag in production.',
-            style: TextStyle(fontSize: 11, color: Color(0xFFB45309)),
-          ),
-          const SizedBox(height: 12),
-          if (_devSimulateBusy)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Center(child: LinearProgressIndicator()),
-            )
-          else ...[
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _runSimulateApprove,
-                    style: FilledButton.styleFrom(backgroundColor: const Color(0xFF16A34A)),
-                    child: const Text('Simulate Approve'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _runSimulateReject,
-                    style: FilledButton.styleFrom(backgroundColor: const Color(0xFFEA580C)),
-                    child: const Text('Simulate Reject'),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final chefDocAsync = ref.watch(chefDocStreamProvider);
@@ -195,23 +65,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             final warningCount = chefDoc?.warningCount ?? 0;
             final freezeUntil = chefDoc?.freezeUntil;
 
-            if (freezeUntil != null && freezeUntil.isAfter(DateTime.now()) && warningCount >= 1 && warningCount < 3) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) {
-                  context.go(RouteNames.chefFrozen);
-                }
-              });
-            }
-
-            // If blocked, redirect to dedicated blocked screen so cook cannot access other screens.
-            if (warningCount >= 3) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) {
-                  context.go(RouteNames.accountSuspended);
-                }
-              });
-            }
-
             return Column(
               children: [
                 _buildHeader(context, user?.name ?? '—', kitchenName),
@@ -219,11 +72,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   child: SingleChildScrollView(
                     child: Column(
                       children: [
+                        _buildRejectionReasonNotices(context, user, chefDoc),
                         _buildVerificationCard(context, chefId, isOnline),
+                        if (chefDoc != null && !chefDoc.hasKitchenMapPin) ...[
+                          const SizedBox(height: 16),
+                          _buildKitchenLocationRequiredBanner(context),
+                        ],
+                        if (chefDoc != null && chefDoc.isFreezeActive) ...[
+                          const SizedBox(height: 16),
+                          CookFreezeBanner(chefDoc: chefDoc),
+                        ],
                         const SizedBox(height: 16),
                         _buildWorkingHoursCard(workingHours),
                         const SizedBox(height: 16),
-                        if (chefDoc != null) _buildProfileDetailsCard(context, chefDoc!),
+                        if (chefDoc != null) _buildProfileDetailsCard(context, chefDoc),
                         if (chefDoc != null) const SizedBox(height: 16),
                         _buildOptions(context, chefDoc, warningCount, freezeUntil),
                       ],
@@ -313,26 +175,145 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             kitchenName,
             style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 13),
           ),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              _statItem('—', 'Orders'),
-            ],
-          ),
         ],
       ),
     );
   }
 
-  Widget _statItem(String value, String label) {
+  /// Shows admin rejection reasons from [chef_profiles] (account or document suspension).
+  Widget _buildRejectionReasonNotices(
+    BuildContext context,
+    UserEntity? user,
+    ChefDocModel? chefDoc,
+  ) {
+    final accountReason = (user?.rejectionReason ?? '').trim();
+    final suspensionReason = (chefDoc?.suspensionReason ?? '').trim();
+    final showAccount = user != null &&
+        user.isChef &&
+        user.isChefPartialAccess &&
+        accountReason.isNotEmpty;
+    final showSuspension =
+        chefDoc != null && chefDoc.suspended && suspensionReason.isNotEmpty;
+
+    if (!showAccount && !showSuspension) {
+      return const SizedBox.shrink();
+    }
+
+    void openDocuments() {
+      Navigator.push<void>(
+        context,
+        MaterialPageRoute<void>(builder: (_) => const DocumentsScreen()),
+      );
+    }
+
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20)),
-          Text(label, style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 12)),
+          if (showAccount) ...[
+            _rejectionNoticeCard(
+              title: 'Application update',
+              body: accountReason,
+              onOpenDocuments: openDocuments,
+            ),
+            if (showSuspension) const SizedBox(height: 12),
+          ],
+          if (showSuspension)
+            _rejectionNoticeCard(
+              title: 'Document review',
+              body: suspensionReason,
+              onOpenDocuments: openDocuments,
+            ),
         ],
+      ),
+    );
+  }
+
+  Widget _rejectionNoticeCard({
+    required String title,
+    required String body,
+    required VoidCallback onOpenDocuments,
+  }) {
+    return Material(
+      color: AppDesignSystem.errorRed.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 14,
+                color: AppDesignSystem.errorRed,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              body,
+              style: const TextStyle(fontSize: 13, height: 1.35, color: _C.text),
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: TextButton(
+                onPressed: onOpenDocuments,
+                child: const Text('Open Documents'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildKitchenLocationRequiredBanner(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Material(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.pin_drop_rounded, color: Colors.orange.shade800, size: 26),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Set your kitchen location',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.orange.shade900,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Add a map pin in Edit profile so customers can discover your kitchen by distance.',
+                      style: TextStyle(fontSize: 13, height: 1.35, color: _C.text),
+                    ),
+                    const SizedBox(height: 10),
+                    TextButton(
+                      onPressed: () => Navigator.push<void>(
+                        context,
+                        MaterialPageRoute<void>(builder: (_) => const EditProfileScreen()),
+                      ),
+                      child: const Text('Open Edit profile'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -395,10 +376,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                               .eq('id', chefId);
                         }
                         ref.invalidate(chefDocStreamProvider);
-                      } catch (_) {
+                      } catch (e) {
                         if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Generic error')),
+                            SnackBar(
+                              content: Text(userFriendlyErrorMessage(e)),
+                            ),
                           );
                         }
                       }
@@ -564,8 +547,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                     );
                                     if (picked != null) {
                                       setStateSheet(() {
-                                        row['open'] =
-                                            picked.format(ctx).padLeft(5, '0');
+                                        row['open'] = _timeOfDayToHHmm(picked);
                                       });
                                     }
                                   },
@@ -581,8 +563,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                     );
                                     if (picked != null) {
                                       setStateSheet(() {
-                                        row['close'] =
-                                            picked.format(ctx).padLeft(5, '0');
+                                        row['close'] = _timeOfDayToHHmm(picked);
                                       });
                                     }
                                   },
@@ -603,24 +584,59 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         for (final d in days) {
                           final row = local[d] as Map<String, dynamic>;
                           if (row['enabled'] == true) {
+                            final open = (row['open'] as String?)?.trim() ?? '';
+                            final close = (row['close'] as String?)?.trim() ?? '';
+                            final openErr = NahamValidators.timeHHmm(open);
+                            final closeErr = NahamValidators.timeHHmm(close);
+                            if (openErr != null || closeErr != null) {
+                              if (ctx.mounted) {
+                                ScaffoldMessenger.of(ctx).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      '${friendly[d] ?? d}: ${openErr ?? closeErr}',
+                                    ),
+                                  ),
+                                );
+                              }
+                              return;
+                            }
                             toSave[d] = {
-                              'open': row['open'],
-                              'close': row['close'],
+                              'open': open,
+                              'close': close,
                             };
                           }
                         }
                         try {
+                          final doc = ref.read(chefDocStreamProvider).valueOrNull;
+                          final currentOnline = doc?.isOnline ?? false;
                           await ref
                               .read(chefFirebaseDataSourceProvider)
                               .setWorkingHours(chefId, toSave);
+                          final eval = evaluateChefStorefront(
+                            vacationMode: doc?.vacationMode ?? false,
+                            isOnline: currentOnline,
+                            workingHoursStart: doc?.workingHoursStart,
+                            workingHoursEnd: doc?.workingHoursEnd,
+                            workingHoursJson: toSave,
+                            vacationRangeStart: doc?.vacationStart,
+                            vacationRangeEnd: doc?.vacationEnd,
+                            freezeUntil: doc?.freezeUntil,
+                            freezeType: doc?.freezeType,
+                          );
+                          if (!eval.isAcceptingOrders && currentOnline) {
+                            await Supabase.instance.client
+                                .from('chef_profiles')
+                                .update({'is_online': false})
+                                .eq('id', chefId);
+                          }
                           ref.invalidate(chefDocStreamProvider);
                           if (Navigator.canPop(ctx)) Navigator.pop(ctx);
                         } catch (e) {
                           if (mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                  content:
-                                      Text('Generic error')),
+                              SnackBar(
+                                content: Text(userFriendlyErrorMessage(e)),
+                              ),
                             );
                           }
                         }
@@ -650,13 +666,34 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
+  /// Persisted + parsed working times are strict 24h `HH:mm` (availability engine).
+  static String _timeOfDayToHHmm(TimeOfDay t) {
+    return '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  }
+
   TimeOfDay _parseTimeOfDay(String value) {
     try {
-      final parts = value.split(':');
-      if (parts.length != 2) return const TimeOfDay(hour: 9, minute: 0);
-      final h = int.tryParse(parts[0]) ?? 9;
-      final m = int.tryParse(parts[1]) ?? 0;
-      return TimeOfDay(hour: h.clamp(0, 23), minute: m.clamp(0, 59));
+      final trimmed = value.trim();
+      // Strict 24h H:mm or HH:mm
+      final h24 = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(trimmed);
+      if (h24 != null) {
+        final h = int.tryParse(h24.group(1)!) ?? 9;
+        final m = int.tryParse(h24.group(2)!) ?? 0;
+        return TimeOfDay(hour: h.clamp(0, 23), minute: m.clamp(0, 59));
+      }
+      // Legacy rows: locale picker strings e.g. "9:00 AM"
+      final h12 = RegExp(
+        r'^(\d{1,2}):(\d{2})\s*([AaPp][Mm])',
+      ).firstMatch(trimmed.replaceAll('\u202f', ' '));
+      if (h12 != null) {
+        var h = int.tryParse(h12.group(1)!) ?? 9;
+        final m = int.tryParse(h12.group(2)!) ?? 0;
+        final ap = h12.group(3)!.toUpperCase();
+        if (ap == 'PM' && h < 12) h += 12;
+        if (ap == 'AM' && h == 12) h = 0;
+        return TimeOfDay(hour: h.clamp(0, 23), minute: m.clamp(0, 59));
+      }
+      return const TimeOfDay(hour: 9, minute: 0);
     } catch (_) {
       return const TimeOfDay(hour: 9, minute: 0);
     }
@@ -741,9 +778,21 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             onTap: () => context.push(RouteNames.chefNotifications),
           ),
           _optionCard(
+            icon: Icons.fact_check_outlined,
+            title: 'Kitchen inspections',
+            subtitle: 'History & compliance',
+            onTap: () => context.push(RouteNames.chefComplianceHistory),
+          ),
+          _optionCard(
             icon: Icons.description_outlined,
             title: 'Documents',
-            subtitle: 'ID, licenses, certificates',
+            subtitle: () {
+              final iv = chefDoc?.inspectionViolationCount ?? 0;
+              if (iv > 0) {
+                return 'ID, licenses… · $iv inspection violation${iv == 1 ? '' : 's'} on record';
+              }
+              return 'ID, licenses, certificates';
+            }(),
             onTap: () => Navigator.push<void>(
               context,
               MaterialPageRoute<void>(builder: (_) => const DocumentsScreen()),
@@ -752,7 +801,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           _optionCard(
             icon: Icons.verified_user_outlined,
             title: 'Clean record',
-            subtitle: 'Inspections & account standing',
+            subtitle: 'Standing & compliance',
             onTap: () {
               final wc = warningCount;
               final fu = freezeUntil;
@@ -779,10 +828,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             subtitle: 'Revenue, charts',
             onTap: () => Navigator.push<void>(context, MaterialPageRoute<void>(builder: (_) => const EarningsScreen())),
           ),
-          if (CookDevReview.simulationModeEnabled) ...[
-            const SizedBox(height: 8),
-            _buildDevSimulateSection(),
-          ],
           const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
@@ -791,7 +836,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 await ref.read(authStateProvider.notifier).logout();
                 if (!context.mounted) return;
                 Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (_) => LoginScreen()),
+                  MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
                   (route) => false,
                 );
               },
@@ -1212,11 +1257,7 @@ class _FormField extends StatelessWidget {
       );
 }
 
-class _StandingStage {
-  final String label;
-  final String emoji;
-  const _StandingStage(this.label, this.emoji);
-}
+enum _RecordStanding { clean, warning, frozen, blocked }
 
 class CleanRecordScreen extends StatelessWidget {
   const CleanRecordScreen({
@@ -1228,162 +1269,118 @@ class CleanRecordScreen extends StatelessWidget {
   final int warningCount;
   final DateTime? freezeUntil;
 
+  static _RecordStanding _computeStanding(DateTime now, int warningCount, DateTime? freezeUntil) {
+    if (warningCount >= 3) return _RecordStanding.blocked;
+    if (freezeUntil != null && freezeUntil.isAfter(now) && warningCount >= 1) {
+      return _RecordStanding.frozen;
+    }
+    if (warningCount >= 1) return _RecordStanding.warning;
+    return _RecordStanding.clean;
+  }
+
+  static Widget _standingRow({
+    required String title,
+    required String badge,
+    required Color badgeColor,
+    required bool active,
+  }) {
+    final border = active ? badgeColor : const Color(0xFFE5E7EB);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: active ? badgeColor.withValues(alpha: 0.08) : Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: border, width: active ? 1.5 : 1),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                color: const Color(0xFF111827),
+              ),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: badgeColor.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              badge,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: badgeColor,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
-    int activeIndex;
-    int? daysRemaining;
-
-    if (warningCount >= 3) {
-      activeIndex = 5; // Blocked
-    } else if (freezeUntil != null && warningCount >= 1) {
-      final diff = freezeUntil!.difference(now).inDays + 1;
-      daysRemaining = diff < 0 ? 0 : diff;
-      if (daysRemaining <= 3) {
-        activeIndex = 2;
-      } else if (daysRemaining <= 7) {
-        activeIndex = 3;
-      } else {
-        activeIndex = 4;
-      }
-    } else if (warningCount == 1) {
-      activeIndex = 1;
-    } else {
-      activeIndex = 0;
-    }
-
-    final stages = const [
-      _StandingStage('Clean (no violations)', '🟢'),
-      _StandingStage('Warning (first notice)', '🟠'),
-      _StandingStage('Frozen 3 days (second strike)', '🔵'),
-      _StandingStage('Frozen 7 days (third strike)', '🔵'),
-      _StandingStage('Frozen 14 days (fourth strike)', '🔵'),
-      _StandingStage('Blocked (account closed)', '⚫'),
-    ];
-
+    final standing = _computeStanding(now, warningCount, freezeUntil);
     final isBlocked = warningCount >= 3 && freezeUntil == null;
 
     final content = Scaffold(
       appBar: AppBar(
         title: const Text('Clean record'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Your standing updates when admins run inspections. '
-              'Missing a call or not meeting requirements moves you to the next stage.',
-              style: TextStyle(fontSize: 13),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          _standingRow(
+            title: 'Clean',
+            badge: 'Clean',
+            badgeColor: const Color(0xFF1E8E3E),
+            active: standing == _RecordStanding.clean,
+          ),
+          const SizedBox(height: 8),
+          _standingRow(
+            title: 'Warning',
+            badge: 'Warning',
+            badgeColor: const Color(0xFFD97706),
+            active: standing == _RecordStanding.warning,
+          ),
+          const SizedBox(height: 8),
+          _standingRow(
+            title: 'Frozen',
+            badge: 'Frozen',
+            badgeColor: const Color(0xFF0284C7),
+            active: standing == _RecordStanding.frozen,
+          ),
+          const SizedBox(height: 8),
+          _standingRow(
+            title: 'Blocked',
+            badge: 'Blocked',
+            badgeColor: const Color(0xFFB91C1C),
+            active: standing == _RecordStanding.blocked,
+          ),
+          if (freezeUntil != null && warningCount >= 1 && warningCount < 3) ...[
+            const SizedBox(height: 12),
+            Builder(
+              builder: (context) {
+                final diff = freezeUntil!.difference(now);
+                final totalSeconds = diff.inSeconds < 0 ? 0 : diff.inSeconds;
+                final days = totalSeconds ~/ (24 * 3600);
+                final hours = (totalSeconds % (24 * 3600)) ~/ 3600;
+                return Text(
+                  'Freeze: $days d, $hours h left',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF64748B)),
+                );
+              },
             ),
-            const SizedBox(height: 16),
-            if (warningCount == 1 && freezeUntil == null)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFFF4E5),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: const Color(0xFFF59E0B)),
-                ),
-                child: const Text(
-                  'You received a warning',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF92400E),
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            Expanded(
-              child: ListView.separated(
-                itemCount: stages.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
-                itemBuilder: (context, index) {
-                  final s = stages[index];
-                  final isActive = index == activeIndex;
-                  Color bg;
-                  Color border;
-                  Color textColor;
-                  if (isActive) {
-                    if (index == 0) {
-                      bg = const Color(0xFFE6F4EA);
-                      border = const Color(0xFF1E8E3E);
-                      textColor = const Color(0xFF1E8E3E);
-                    } else if (index == 1) {
-                      bg = const Color(0xFFFFF4E5);
-                      border = const Color(0xFFF59E0B);
-                      textColor = const Color(0xFF92400E);
-                    } else if (index >= 2 && index <= 4) {
-                      bg = const Color(0xFFE0F2FE);
-                      border = const Color(0xFF38BDF8);
-                      textColor = const Color(0xFF0F172A);
-                    } else {
-                      bg = const Color(0xFF000000);
-                      border = const Color(0xFF000000);
-                      textColor = Colors.white;
-                    }
-                  } else {
-                    bg = Colors.white;
-                    border = const Color(0xFFE5E7EB);
-                    textColor = const Color(0xFF374151);
-                  }
-
-                  return Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: bg,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: border),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          s.emoji,
-                          style: const TextStyle(fontSize: 20),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            s.label,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight:
-                                  isActive ? FontWeight.w700 : FontWeight.w500,
-                              color: textColor,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-            if (freezeUntil != null && warningCount >= 1 && warningCount < 3)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Builder(
-                  builder: (context) {
-                    final diff = freezeUntil!.difference(now);
-                    final totalSeconds = diff.inSeconds < 0 ? 0 : diff.inSeconds;
-                    final days = totalSeconds ~/ (24 * 3600);
-                    final hours = (totalSeconds % (24 * 3600)) ~/ 3600;
-                    return Text(
-                      '$days days, $hours hours remaining',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    );
-                  },
-                ),
-              ),
           ],
-        ),
+        ],
       ),
     );
 
@@ -1497,52 +1494,6 @@ class CleanRecordScreen extends StatelessWidget {
               ),
             ),
           ),
-        ),
-      ],
-    );
-  }
-}
-
-class _SimulateChefRejectReasonDialog extends StatefulWidget {
-  const _SimulateChefRejectReasonDialog();
-
-  @override
-  State<_SimulateChefRejectReasonDialog> createState() => _SimulateChefRejectReasonDialogState();
-}
-
-class _SimulateChefRejectReasonDialogState extends State<_SimulateChefRejectReasonDialog> {
-  final TextEditingController _reason = TextEditingController();
-
-  @override
-  void dispose() {
-    _reason.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Simulate reject — reason'),
-      content: TextField(
-        controller: _reason,
-        decoration: const InputDecoration(hintText: 'Reason (sent like real admin reject)'),
-        maxLines: 3,
-        autofocus: true,
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-        FilledButton(
-          onPressed: () {
-            final t = _reason.text.trim();
-            if (t.isEmpty) {
-              ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                const SnackBar(content: Text('Enter a reason.')),
-              );
-              return;
-            }
-            Navigator.pop(context, t);
-          },
-          child: const Text('Reject'),
         ),
       ],
     );

@@ -7,11 +7,14 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/debug/debug_auth_bypass.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../../chat/data/chat_limits.dart';
 
+typedef _LatestMsg = ({String content, DateTime? at});
+
 class CustomerChatSupabaseDatasource {
-  SupabaseClient get _sb => SupabaseConfig.client;
+  SupabaseClient get _sb => SupabaseConfig.dataClient;
 
   /// When DB has duplicate rows (same customer + chef), `.maybeSingle()` throws 406.
   /// Always take the latest row by `created_at`.
@@ -102,16 +105,40 @@ class CustomerChatSupabaseDatasource {
             if (atB == null) return -1;
             return atB.compareTo(atA);
           });
-          return filtered.map((row) {
+          final convIds = filtered
+              .map((row) => (row['id'] ?? '').toString())
+              .where((id) => id.isNotEmpty)
+              .toList();
+          final latestByConv = await _latestMessageByConversationId(convIds);
+          final rows = filtered.map((row) {
+            final id = (row['id'] ?? '').toString();
+            final lm = id.isNotEmpty ? latestByConv[id] : null;
+            String? lastMsg = row['last_message'] as String?;
+            DateTime? lastAt = _parseDateTime(row['last_message_at'] ?? row['created_at']);
+            if (lm != null) {
+              lastMsg = lm.content;
+              lastAt = lm.at ?? lastAt;
+            } else if (lastMsg != null) {
+              lastMsg = lastMsg.trim();
+              if (lastMsg.isEmpty) lastMsg = null;
+            }
             final otherName = _otherParticipantName(row, type, chefNames);
-            final at = row['last_message_at'] ?? row['created_at'];
             return {
               'id': row['id'] as String?,
               'otherParticipantName': otherName,
-              'lastMessage': row['last_message'] as String?,
-              'lastMessageAt': _parseDateTime(at),
+              'lastMessage': lastMsg,
+              'lastMessageAt': lastAt,
             };
           }).toList();
+          rows.sort((a, b) {
+            final atA = a['lastMessageAt'] as DateTime?;
+            final atB = b['lastMessageAt'] as DateTime?;
+            if (atA == null && atB == null) return 0;
+            if (atA == null) return 1;
+            if (atB == null) return -1;
+            return atB.compareTo(atA);
+          });
+          return rows;
         });
   }
 
@@ -138,6 +165,34 @@ class CustomerChatSupabaseDatasource {
     return null;
   }
 
+  /// Inbox rows often omit [conversations.last_message] (not updated on send); truth is in [messages].
+  Future<Map<String, _LatestMsg>> _latestMessageByConversationId(List<String> conversationIds) async {
+    if (conversationIds.isEmpty) return {};
+    final cap = (conversationIds.length * ChatLimits.recentMessagesForUnread)
+        .clamp(ChatLimits.recentMessagesForUnread, ChatLimits.maxInboxBatchMessageRows);
+    try {
+      final res = await _sb
+          .from('messages')
+          .select('conversation_id, content, created_at')
+          .inFilter('conversation_id', conversationIds)
+          .order('created_at', ascending: false)
+          .limit(cap);
+      final out = <String, _LatestMsg>{};
+      for (final raw in res as List) {
+        final m = Map<String, dynamic>.from(raw as Map);
+        final cid = (m['conversation_id'] ?? '').toString();
+        if (cid.isEmpty || out.containsKey(cid)) continue;
+        final text = (m['content'] ?? '').toString().trim();
+        if (text.isEmpty) continue;
+        out[cid] = (content: text, at: _parseDateTime(m['created_at']));
+      }
+      return out;
+    } catch (e, st) {
+      debugPrint('[CustomerChat] _latestMessageByConversationId: $e\n$st');
+      return {};
+    }
+  }
+
   /// Stream messages for a conversation. Returns list of maps: id, senderId, content, createdAt (String).
   Stream<List<Map<String, dynamic>>> watchMessages(String conversationId) {
     return _sb
@@ -159,9 +214,11 @@ class CustomerChatSupabaseDatasource {
               : sorted;
           return capped.map((row) {
               final at = row['created_at'];
+              final rawSender = row['sender_id'];
+              final senderStr = rawSender == null ? '' : rawSender.toString().trim();
               return {
                 'id': row['id'] as String?,
-                'senderId': row['sender_id'] as String?,
+                'senderId': senderStr.isEmpty ? null : senderStr,
                 'content': row['content'] as String?,
                 'createdAt': at is DateTime
                     ? at.toIso8601String()
@@ -172,19 +229,22 @@ class CustomerChatSupabaseDatasource {
   }
 
   /// Send a message. Accepts [conversationId] or [chatId].
-  /// conversations table has no last_message/last_message_at in schema, so we only insert message.
+  /// Also updates [conversations.last_message] when those columns exist and RLS allows (best-effort).
+  /// [senderId] is ignored for production; [sender_id] is the session user, or the debug bypass UUID.
   Future<void> sendMessage({
     String? conversationId,
     String? chatId,
-    required String senderId,
+    String? senderId,
     required String content,
   }) async {
     final cid = conversationId ?? chatId ?? '';
     if (cid.isEmpty) throw ArgumentError('conversationId or chatId required');
     final trimmed = content.trim();
     if (trimmed.isEmpty) throw ArgumentError('Message content is empty');
-    final sid = senderId.trim();
-    if (sid.isEmpty) throw ArgumentError('senderId required');
+    final sid = (effectiveSupabaseAuthUserId(_sb) ?? '').trim();
+    if (sid.isEmpty) {
+      throw ArgumentError('Must be signed in to send messages');
+    }
     final now = DateTime.now().toUtc().toIso8601String();
     try {
       await _sb.from('messages').insert({
@@ -199,7 +259,14 @@ class CustomerChatSupabaseDatasource {
       debugPrint('[CustomerChat] sendMessage stackTrace: $st');
       rethrow;
     }
-    // Schema has only: id, type, customer_id, chef_id, admin_id, created_at — no last_message/last_message_at
+    try {
+      await _sb.from('conversations').update({
+        'last_message': trimmed,
+        'last_message_at': now,
+      }).eq('id', cid);
+    } catch (e, st) {
+      debugPrint('[CustomerChat] conversations last_message update (non-fatal): $e\n$st');
+    }
   }
 
   /// Create a customer-chef conversation. Returns conversation id.
@@ -318,19 +385,29 @@ class CustomerChatSupabaseDatasource {
   Future<String> getOrCreateCustomerSupportChat({
     required String customerId,
   }) async {
+    final cid = customerId.trim();
+    if (cid.isEmpty) throw ArgumentError('customerId required');
     try {
-      final existingId = await _latestCustomerSupportConversationId(customerId);
+      final existingId = await _latestCustomerSupportConversationId(cid);
       if (existingId != null) return existingId;
       final now = DateTime.now().toUtc().toIso8601String();
-      final res = await _sb.from('conversations').insert({
-        'customer_id': customerId,
-        'chef_id': null,
-        'type': 'customer-support',
-        'created_at': now,
-      }).select('id').single();
-      final id = res['id'] as String?;
-      if (id == null || id.isEmpty) throw Exception('Failed to create support conversation');
-      return id;
+      try {
+        final res = await _sb.from('conversations').insert({
+          'customer_id': cid,
+          'chef_id': null,
+          'type': 'customer-support',
+          'created_at': now,
+        }).select('id').single();
+        final id = res['id'] as String?;
+        if (id == null || id.isEmpty) throw Exception('Failed to create support conversation');
+        return id;
+      } on PostgrestException catch (pe) {
+        if (pe.code == '23505') {
+          final again = await _latestCustomerSupportConversationId(cid);
+          if (again != null) return again;
+        }
+        rethrow;
+      }
     } catch (e, st) {
       debugPrint('[CustomerChat] getOrCreateCustomerSupportChat error: $e');
       debugPrint('[CustomerChat] getOrCreateCustomerSupportChat stackTrace: $st');

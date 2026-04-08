@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/constants/route_names.dart';
@@ -67,15 +68,24 @@ class _FrozenScreenState extends ConsumerState<FrozenScreen> {
     super.dispose();
   }
 
+  String _freezeUntilLabel() {
+    final u = _freezeUntil;
+    if (u == null) return 'End date unavailable';
+    final local = u.toLocal();
+    return DateFormat.yMMMd().add_jm().format(local);
+  }
+
   String _countdownText() {
-    if (_freezeUntil == null) return 'Freeze end time unavailable';
+    if (_freezeUntil == null) return 'Remaining time unavailable';
     final diff = _freezeUntil!.difference(DateTime.now());
     if (diff.isNegative) return 'Freeze period ended';
     final days = diff.inDays;
     final hours = diff.inHours % 24;
     final minutes = diff.inMinutes % 60;
-    final seconds = diff.inSeconds % 60;
-    return '$days d $hours h $minutes m $seconds s remaining';
+    final d = days == 1 ? 'day' : 'days';
+    final h = hours == 1 ? 'hour' : 'hours';
+    final m = minutes == 1 ? 'minute' : 'minutes';
+    return '$days $d $hours $h $minutes $m remaining';
   }
 
   @override
@@ -101,17 +111,23 @@ class _FrozenScreenState extends ConsumerState<FrozenScreen> {
                 ),
                 const SizedBox(height: 24),
                 const Text(
-                  'Account frozen',
+                  'Account Frozen',
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: _NC.text),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  'Your account is temporarily frozen. You can continue after the timer ends.',
+                  'Your account is temporarily frozen. You cannot accept orders or edit the menu until the freeze ends.',
                   style: TextStyle(fontSize: 15, color: _NC.textSub, height: 1.5),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
+                Text(
+                  'Until: ${_freezeUntilLabel()}',
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _NC.text),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
                 Text(
                   _countdownText(),
                   style: const TextStyle(
@@ -121,7 +137,27 @@ class _FrozenScreenState extends ConsumerState<FrozenScreen> {
                   ),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: 16),
+                const Text(
+                  'You can still open Notifications for messages from the team.',
+                  style: TextStyle(fontSize: 14, color: _NC.textSub, height: 1.45),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => context.push(RouteNames.chefNotifications),
+                    icon: const Icon(Icons.notifications_outlined, color: _NC.primary),
+                    label: const Text('Open notifications'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _NC.primary,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
@@ -134,7 +170,7 @@ class _FrozenScreenState extends ConsumerState<FrozenScreen> {
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     ),
-                    child: const Text('Sign out'),
+                    child: const Text('Logout'),
                   ),
                 ),
               ],

@@ -1,15 +1,13 @@
 import '../../domain/entities/dish_entity.dart';
 import '../../domain/repositories/menu_repository.dart';
-import '../datasources/menu_mock_datasource.dart';
 import '../datasources/menu_remote_datasource.dart';
 import '../models/dish_model.dart';
 
 class MenuRepositoryImpl implements MenuRepository {
   final MenuRemoteDataSource remoteDataSource;
 
-  MenuRepositoryImpl({
-    MenuRemoteDataSource? remoteDataSource,
-  }) : remoteDataSource = remoteDataSource ?? MenuMockDataSource();
+  /// Production paths must pass a real [MenuRemoteDataSource] (e.g. [MenuSupabaseDataSource] via [menuRepositoryProvider]).
+  MenuRepositoryImpl({required this.remoteDataSource});
 
   @override
   Future<List<DishEntity>> getDishes() async {
@@ -43,6 +41,7 @@ class MenuRepositoryImpl implements MenuRepository {
         categories: dish.categories,
         isAvailable: dish.isAvailable,
         preparationTime: dish.preparationTime,
+        remainingQuantity: dish.remainingQuantity,
         createdAt: dish.createdAt,
       );
       final createdDish = await remoteDataSource.createDish(dishModel);
@@ -64,6 +63,7 @@ class MenuRepositoryImpl implements MenuRepository {
         categories: dish.categories,
         isAvailable: dish.isAvailable,
         preparationTime: dish.preparationTime,
+        remainingQuantity: dish.remainingQuantity,
         createdAt: dish.createdAt,
         updatedAt: dish.updatedAt,
       );

@@ -3,6 +3,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../domain/entities/user_entity.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../../../../core/debug/debug_auth_bypass.dart';
+import '../datasources/auth_bypass_datasource.dart';
 import '../datasources/auth_remote_datasource.dart';
 import '../datasources/auth_supabase_datasource.dart';
 
@@ -11,15 +13,20 @@ class AuthRepositoryImpl implements AuthRepository {
 
   AuthRepositoryImpl({
     AuthRemoteDataSource? remoteDataSource,
-  }) : remoteDataSource = remoteDataSource ?? AuthSupabaseDatasource();
+  }) : remoteDataSource = remoteDataSource ??
+            (authBypassIsOn ? AuthBypassDatasource() : AuthSupabaseDatasource());
 
   @override
   Future<UserEntity> login(String email, String password, [AppRole? role]) async {
     try {
       return await remoteDataSource.login(email, password, role);
     } catch (e, st) {
-      debugPrint('[Auth] Login error: $e');
-      debugPrint('[Auth] StackTrace: $st');
+      debugPrint('[Auth] repository.login RAW ERROR TYPE: ${e.runtimeType}');
+      debugPrint('[Auth] repository.login RAW ERROR MESSAGE: $e');
+      debugPrint('[Auth] repository.login STACK: $st');
+      if (kDebugMode) {
+        rethrow;
+      }
       throw Exception(_sanitize(e));
     }
   }
@@ -41,8 +48,12 @@ class AuthRepositoryImpl implements AuthRepository {
         role: role,
       );
     } catch (e, st) {
-      debugPrint('[Auth] Signup error: $e');
-      debugPrint('[Auth] StackTrace: $st');
+      debugPrint('[Auth] repository.signup RAW ERROR TYPE: ${e.runtimeType}');
+      debugPrint('[Auth] repository.signup RAW ERROR MESSAGE: $e');
+      debugPrint('[Auth] repository.signup STACK: $st');
+      if (kDebugMode) {
+        rethrow;
+      }
       throw Exception(_sanitize(e));
     }
   }
@@ -51,7 +62,13 @@ class AuthRepositoryImpl implements AuthRepository {
   Future<void> logout() async {
     try {
       await remoteDataSource.logout();
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[Auth] repository.logout RAW ERROR TYPE: ${e.runtimeType}');
+      debugPrint('[Auth] repository.logout RAW ERROR MESSAGE: $e');
+      debugPrint('[Auth] repository.logout STACK: $st');
+      if (kDebugMode) {
+        rethrow;
+      }
       throw Exception(_sanitize(e));
     }
   }
@@ -60,13 +77,17 @@ class AuthRepositoryImpl implements AuthRepository {
   Future<UserEntity?> getCurrentUser() async {
     try {
       return await remoteDataSource.getCurrentUser();
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[AUTH] repository.getCurrentUser failed: $e\n$st');
       return null;
     }
   }
 
   @override
   Stream<void> watchAuthState() {
+    if (remoteDataSource is AuthBypassDatasource) {
+      return const Stream<void>.empty();
+    }
     if (remoteDataSource is AuthSupabaseDatasource) {
       return (remoteDataSource as AuthSupabaseDatasource)
           .watchAuthState()
@@ -77,13 +98,22 @@ class AuthRepositoryImpl implements AuthRepository {
 
   @override
   Future<void> resetPassword(String email) async {
+    if (remoteDataSource is AuthBypassDatasource) {
+      return;
+    }
     try {
       if (remoteDataSource is AuthSupabaseDatasource) {
         await (remoteDataSource as AuthSupabaseDatasource).resetPassword(email);
       } else {
         throw UnimplementedError('Reset password requires Supabase auth');
       }
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[Auth] repository.resetPassword RAW ERROR TYPE: ${e.runtimeType}');
+      debugPrint('[Auth] repository.resetPassword RAW ERROR MESSAGE: $e');
+      debugPrint('[Auth] repository.resetPassword STACK: $st');
+      if (kDebugMode) {
+        rethrow;
+      }
       throw Exception(_sanitize(e));
     }
   }
@@ -108,6 +138,16 @@ class AuthRepositoryImpl implements AuthRepository {
     }
     if (msg.contains('rate limit') || msg.contains('rate_limit') || msg.contains('email rate limit') || msg.contains('429')) {
       return 'Too many attempts. Please wait a few minutes and try again.';
+    }
+    if (msg.contains('email') && (msg.contains('invalid') || msg.contains('malformed'))) {
+      return 'Please enter a valid email address.';
+    }
+    if (msg.contains('confirm') &&
+        (msg.contains('email') || msg.contains('inbox') || msg.contains('sign in'))) {
+      return 'Confirm your email from the link we sent, then sign in.';
+    }
+    if (msg.contains('profile could not be saved')) {
+      return 'Your account was created but your profile could not be saved. Try signing in again.';
     }
     if (msg.contains('infinite recursion') && msg.contains('profiles')) {
       return 'Server configuration error (profiles). Please try again later or contact support.';

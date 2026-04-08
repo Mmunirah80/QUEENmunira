@@ -1,7 +1,4 @@
-import 'dart:math';
-
 import '../../../../core/constants/app_constants.dart';
-import '../../domain/entities/dish_entity.dart';
 import '../models/dish_model.dart';
 import 'menu_remote_datasource.dart';
 
@@ -61,7 +58,8 @@ class MenuMockDataSource implements MenuRemoteDataSource {
           categories: dishes[i]['categories'] as List<String>,
           preparationTime: dishes[i]['preparationTime'] as int,
           createdAt: DateTime.now().subtract(Duration(days: i)),
-          isAvailable: Random().nextBool(),
+          isAvailable: false,
+          remainingQuantity: 0,
         ),
       );
     }
@@ -94,6 +92,7 @@ class MenuMockDataSource implements MenuRemoteDataSource {
       categories: dish.categories,
       isAvailable: dish.isAvailable,
       preparationTime: dish.preparationTime,
+      remainingQuantity: dish.remainingQuantity,
       createdAt: DateTime.now(),
     );
     _dishes.add(newDish);
@@ -116,6 +115,7 @@ class MenuMockDataSource implements MenuRemoteDataSource {
       categories: dish.categories,
       isAvailable: dish.isAvailable,
       preparationTime: dish.preparationTime,
+      remainingQuantity: dish.remainingQuantity,
       createdAt: dish.createdAt,
       updatedAt: DateTime.now(),
     );

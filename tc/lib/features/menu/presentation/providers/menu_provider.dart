@@ -1,7 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../auth/presentation/providers/auth_provider.dart';
-import '../../data/datasources/menu_remote_datasource.dart';
 import '../../data/datasources/menu_supabase_datasource.dart';
 import '../../data/repositories/menu_repository_impl.dart';
 import '../../domain/entities/dish_entity.dart';

@@ -3,6 +3,8 @@
 // Same DishCard style as home; empty state when no results.
 // ============================================================
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -128,12 +130,14 @@ class _NahamCustomerSearchScreenState extends ConsumerState<NahamCustomerSearchS
                 chefs,
                 pickupOrigin.latitude,
                 pickupOrigin.longitude,
+                pickupLocalityCity: pickupOrigin.localityCity,
               );
               final scoped = allDishes.where((d) => d.chefId != null && ids.contains(d.chefId)).toList();
               final distByChef = pickupDistanceLabelsByChefId(
                 chefs,
                 pickupOrigin.latitude,
                 pickupOrigin.longitude,
+                pickupLocalityCity: pickupOrigin.localityCity,
               );
               final filtered = _filter(scoped, _query, chefById);
 
@@ -174,12 +178,43 @@ class _NahamCustomerSearchScreenState extends ConsumerState<NahamCustomerSearchS
                     chefName: chefName,
                     pickupDistanceLabel: chefId.isNotEmpty ? distByChef[chefId] : null,
                     onAddToCart: () {
-                      if (chefId.isNotEmpty) {
+                      Future<void> add() async {
+                        if (chefId.isEmpty) return;
+                        final frozen =
+                            await ref.read(chefOrderingDisabledForCustomerProvider(chefId).future);
+                        if (!context.mounted) return;
+                        if (frozen) {
+                          SnackbarHelper.error(context, 'Temporarily unavailable');
+                          return;
+                        }
+                        final cartItems = ref.read(cartProvider);
+                        final inCart = cartQuantityForDishChef(cartItems, dish.id, chefId);
+                        final remaining = dish.remainingQuantity;
+                        if (remaining <= 0) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('This dish is sold out'),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                          return;
+                        }
+                        if (inCart >= remaining) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Only $remaining available from this cook'),
+                              backgroundColor: Colors.orange,
+                            ),
+                          );
+                          return;
+                        }
                         ref.read(cartProvider.notifier).add(dish, chefId, chefName);
                         if (context.mounted) {
                           SnackbarHelper.success(context, '${dish.name} added to cart');
                         }
                       }
+
+                      unawaited(add());
                     },
                     onChefTap: chefId.isEmpty
                         ? null

@@ -12,10 +12,15 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/constants/route_names.dart';
+import '../../../core/routing/go_router_redirect_policy.dart';
 import '../../../core/theme/app_design_system.dart';
 import '../../../core/utils/supabase_error_message.dart';
 import '../../auth/presentation/providers/auth_provider.dart';
+import '../presentation/providers/chef_providers.dart';
+import '../../admin/domain/admin_application_review_logic.dart';
 import '../data/chef_documents_compliance.dart';
+import '../data/cook_required_document_types.dart';
+import '../data/chef_expired_documents_notify.dart';
 
 class _NC {
   static const primary = AppDesignSystem.primary;
@@ -96,7 +101,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
         return client
             .from('chef_documents')
             .select(
-              'id,document_type,file_url,status,rejection_reason,expiry_date,created_at',
+              'id,document_type,file_url,status,rejection_reason,expiry_date,no_expiry,created_at',
             )
             .eq('chef_id', userId)
             .order('created_at', ascending: false);
@@ -111,6 +116,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
         _rows = next;
         _statusLoadError = null;
       });
+      unawaited(ChefExpiredDocumentsNotify.ping(client));
     } on TimeoutException catch (e, st) {
       debugPrint('[Documents] _loadStatus timeout=$e\n$st');
       if (!mounted) return;
@@ -136,7 +142,13 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
       return;
     }
     try {
-      GoRouter.of(context).go(RouteNames.chefProfile);
+      final router = GoRouter.of(context);
+      final user = ref.read(authStateProvider).valueOrNull;
+      if (user != null && isChefInDocumentOnboarding(user)) {
+        router.go(RouteNames.cookPending);
+        return;
+      }
+      router.go(RouteNames.chefProfile);
     } catch (e) {
       debugPrint('[Documents] back navigation: $e');
       nav?.pop();
@@ -145,9 +157,12 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
 
   static const _storageBucket = 'documents';
 
-  ({Map<String, dynamic>? latest, int older}) _latestForType(String type) {
-    final list =
-        _rows.where((r) => (r['document_type'] ?? '').toString() == type).toList();
+  ({Map<String, dynamic>? latest, int older}) _latestForType(String canonicalSlot) {
+    final list = _rows
+        .where((r) =>
+            CookRequiredDocumentTypes.canonicalDocumentType(r['document_type']?.toString()) ==
+            canonicalSlot)
+        .toList();
     list.sort((a, b) {
       final ca = _parseCreated(a['created_at']) ??
           DateTime.fromMillisecondsSinceEpoch(0);
@@ -168,12 +183,24 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
 
   String _effectiveStatus(Map<String, dynamic>? latest) {
     if (latest == null) return 'not_uploaded';
-    final s = (latest['status'] ?? 'pending').toString().toLowerCase();
+    final s = (latest['status'] ?? 'pending_review').toString().toLowerCase();
+    final noExpiry = latest['no_expiry'] == true;
     if (s == 'approved' &&
+        !noExpiry &&
         ChefDocumentsCompliance.isDocumentExpired(latest['expiry_date'])) {
       return 'expired';
     }
     return s;
+  }
+
+  /// Re-upload is limited to slots that are not yet approved (or are expired / rejected).
+  bool _slotAllowsResubmission(String effectiveStatus) {
+    final s = effectiveStatus.toLowerCase();
+    return s == 'not_uploaded' ||
+        s == 'pending_review' ||
+        s == 'pending' ||
+        s == 'rejected' ||
+        s == 'expired';
   }
 
   Future<String?> _previewImageUrl(String? storedPath) async {
@@ -191,34 +218,39 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     }
   }
 
-  Future<DateTime?> _askExpiryOptional(BuildContext context) async {
+  /// Returns null if the user cancels. [no_expiry] true means the document does not expire.
+  Future<({bool noExpiry, DateTime? expiry})?> _askExpiryPolicy(BuildContext context) async {
     final choice = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Expiry date'),
+        title: const Text('Expiry'),
         content: const Text(
-          'If this document has an expiry date, set it so we can remind you before it lapses. You can skip if it does not expire.',
+          'Does this document expire? If it does, you must choose the expiry date.',
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx, 'skip'),
+            onPressed: () => Navigator.pop(ctx, 'none'),
             child: const Text('No expiry'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(ctx, 'pick'),
-            child: const Text('Choose date'),
+            onPressed: () => Navigator.pop(ctx, 'date'),
+            child: const Text('Has expiry'),
           ),
         ],
       ),
     );
-    if (choice != 'pick') return null;
+    if (choice == 'none') return (noExpiry: true, expiry: null);
+    if (choice != 'date') return null;
+    if (!context.mounted) return null;
     final now = DateTime.now();
-    return showDatePicker(
+    final d = await showDatePicker(
       context: context,
       initialDate: now.add(const Duration(days: 365)),
       firstDate: now,
       lastDate: now.add(const Duration(days: 365 * 12)),
     );
+    if (d == null) return null;
+    return (noExpiry: false, expiry: d);
   }
 
   Future<void> _uploadDocument(BuildContext context, String type) async {
@@ -230,8 +262,8 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     if (picked == null) return;
 
     if (!mounted) return;
-    final expiry = await _askExpiryOptional(context);
-    if (!mounted) return;
+    final policy = await _askExpiryPolicy(context);
+    if (!mounted || policy == null) return;
 
     setState(() => _uploadBusy = true);
     try {
@@ -243,31 +275,29 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
       await client.storage.from(_storageBucket).uploadBinary(
             path,
             bytes,
-            fileOptions: const FileOptions(upsert: false),
+            fileOptions: const FileOptions(),
           );
 
-      final insert = <String, dynamic>{
-        'chef_id': userId,
-        'document_type': type,
-        'file_url': path,
-        'status': 'pending',
-      };
-      if (expiry != null) {
-        insert['expiry_date'] =
-            '${expiry.year.toString().padLeft(4, '0')}-${expiry.month.toString().padLeft(2, '0')}-${expiry.day.toString().padLeft(2, '0')}';
-      }
+      final expiryStr = !policy.noExpiry && policy.expiry != null
+          ? '${policy.expiry!.year.toString().padLeft(4, '0')}-${policy.expiry!.month.toString().padLeft(2, '0')}-${policy.expiry!.day.toString().padLeft(2, '0')}'
+          : null;
 
-      await client.from('chef_documents').insert(insert);
+      await client.rpc<void>(
+        'chef_upsert_document',
+        params: {
+          'p_document_type': type,
+          'p_file_url': path,
+          'p_no_expiry': policy.noExpiry,
+          'p_expiry_date': expiryStr,
+        },
+      );
 
+      ref.invalidate(chefDocStreamProvider);
       await _loadStatus();
       if (mounted) {
-        final label = type == 'freelancer_id'
-            ? 'Freelancer ID'
-            : type == 'national_id'
-                ? 'National ID'
-                : type == 'license'
-                    ? 'License'
-                    : 'Document';
+        final label = CookRequiredDocumentTypes.labelForSlot(
+          CookRequiredDocumentTypes.canonicalDocumentType(type),
+        );
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('New $label version submitted for review')),
         );
@@ -286,6 +316,9 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
   @override
   Widget build(BuildContext context) {
     final compliance = ChefDocumentsCompliance.evaluate(_rows);
+    final bySlot = latestRequiredDocumentRowsBySlot(_rows);
+    final overall = computeApplicationOverallStatus(bySlot);
+    final overallLine = formatOverallStatusLabel(overall);
     return Directionality(
       textDirection: TextDirection.ltr,
       child: Scaffold(
@@ -321,10 +354,36 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       const Text(
-                        'Each upload is kept as history. Use “Upload new version” for renewals — '
-                        'admins review the latest pending row from the dashboard.',
+                        'One current file per document type. Uploading replaces your pending version '
+                        'for admin review (server-enforced).',
                         style: TextStyle(fontSize: 14, color: _NC.textSub),
                       ),
+                      if (!_listFetchBusy && _rows.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Material(
+                          color: _NC.primary.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.assignment_turned_in_outlined, color: _NC.primary),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Application status: $overallLine',
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w700,
+                                      color: _NC.text,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
                       if (compliance.expiringWithinDays.isNotEmpty) ...[
                         const SizedBox(height: 12),
                         Material(
@@ -386,11 +445,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
   String _expiryWarningText(Map<String, int> daysLeft) {
     final parts = <String>[];
     for (final e in daysLeft.entries) {
-      final name = e.key == 'national_id'
-          ? 'National ID'
-          : e.key == 'freelancer_id'
-              ? 'Freelancer ID'
-              : e.key;
+      final name = CookRequiredDocumentTypes.labelForSlot(e.key);
       parts.add(
         '$name expires in ${e.value} day${e.value == 1 ? '' : 's'}',
       );
@@ -405,25 +460,17 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
         _documentSection(
           context: context,
           userId: userId,
-          title: 'Freelancer ID',
-          type: 'freelancer_id',
+          title: CookRequiredDocumentTypes.labelForSlot(CookRequiredDocumentTypes.idDocument),
+          type: CookRequiredDocumentTypes.idDocument,
           requiredForOnline: true,
         ),
         const SizedBox(height: 16),
         _documentSection(
           context: context,
           userId: userId,
-          title: 'National ID',
-          type: 'national_id',
+          title: CookRequiredDocumentTypes.labelForSlot(CookRequiredDocumentTypes.healthOrKitchen),
+          type: CookRequiredDocumentTypes.healthOrKitchen,
           requiredForOnline: true,
-        ),
-        const SizedBox(height: 16),
-        _documentSection(
-          context: context,
-          userId: userId,
-          title: 'License (optional)',
-          type: 'license',
-          requiredForOnline: false,
         ),
       ],
     );
@@ -444,11 +491,13 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     final url = latest?['file_url']?.toString();
     final rejectionReason = latest?['rejection_reason']?.toString();
     final expiryRaw = latest?['expiry_date'];
+    final noExpiryMeta = latest?['no_expiry'] == true;
 
     final isPdf = (url ?? '').toLowerCase().contains('.pdf');
     final hasPreview = uploaded && url != null && url.isNotEmpty;
     final buttonLabel = uploaded ? 'Upload new version' : 'Upload';
-    final canUpload = userId.isNotEmpty && !_uploadBusy;
+    final allowsReplace = _slotAllowsResubmission(status);
+    final canUpload = userId.isNotEmpty && !_uploadBusy && allowsReplace;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -514,22 +563,50 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
                         style: TextStyle(fontSize: 11, color: _NC.textSub),
                       ),
                     ],
-                    if (expiryRaw != null &&
+                    if (uploaded &&
                         status != 'not_uploaded' &&
                         status != 'expired') ...[
                       const SizedBox(height: 4),
                       Text(
-                        'Expiry: $expiryRaw',
+                        noExpiryMeta
+                            ? 'Expiry: does not expire'
+                            : (expiryRaw != null
+                                ? 'Expiry: $expiryRaw'
+                                : 'Expiry: not set (legacy upload)'),
                         style: const TextStyle(fontSize: 11, color: _NC.textSub),
                       ),
                     ],
-                    if ((rejectionReason ?? '').trim().isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        'Reason: ${rejectionReason!.trim()}',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: AppDesignSystem.errorRed,
+                    if (status == 'rejected') ...[
+                      const SizedBox(height: 10),
+                      Material(
+                        color: AppDesignSystem.errorRed.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(12),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Rejection reason',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                  color: AppDesignSystem.errorRed,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                (rejectionReason ?? '').trim().isNotEmpty
+                                    ? rejectionReason!.trim()
+                                    : 'No reason was stored for this review. Open Chat (Support) if you need help.',
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  height: 1.35,
+                                  color: _NC.text,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ],
@@ -578,6 +655,14 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
             ],
           ),
           const SizedBox(height: 14),
+          if (!allowsReplace && uploaded)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                'This document is approved. You can upload again only if an admin rejects it or it expires.',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+              ),
+            ),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
@@ -588,7 +673,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
-              child: Text(buttonLabel),
+              child: Text(allowsReplace ? buttonLabel : 'Locked'),
             ),
           ),
         ],

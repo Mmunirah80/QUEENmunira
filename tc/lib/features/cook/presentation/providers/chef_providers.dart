@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../menu/domain/entities/dish_entity.dart';
@@ -30,8 +31,15 @@ final chefDocStreamProvider = StreamProvider<ChefDocModel?>((ref) {
       .eq('id', chefId)
       .map((rows) {
         if (rows.isEmpty) return null;
-        final row = rows.first as Map<String, dynamic>;
-        return ChefDocModel.fromSupabase(row);
+        final raw = rows.first;
+        try {
+          return ChefDocModel.fromSupabase(
+            Map<String, dynamic>.from(raw as Map),
+          );
+        } catch (e, st) {
+          debugPrint('[chefDocStream] parse error: $e\n$st');
+          return null;
+        }
       });
 });
 

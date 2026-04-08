@@ -2,14 +2,15 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../../core/constants/route_names.dart';
 import '../../../core/theme/app_design_system.dart';
 import '../../../core/utils/extensions.dart';
 import '../../../core/widgets/snackbar_helper.dart';
 import '../domain/entities/user_entity.dart';
 import '../presentation/providers/auth_provider.dart';
-import 'cook_pending_screen.dart';
 import 'login_screen.dart';
 
 /// Cook sign up: single-step account creation + document upload.
@@ -127,10 +128,9 @@ class _CookSignupScreenState extends ConsumerState<CookSignupScreen> {
 
       // TODO: Wire document upload to Supabase storage + chef_profiles when backend is ready.
 
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute<void>(builder: (_) => const CookPendingScreen()),
-        (_) => false,
-      );
+      ref.read(selectedRoleProvider.notifier).state = AppRole.chef;
+      debugPrint('[ROUTER] cook signup ok -> splash');
+      context.go(RouteNames.splash);
     } catch (e) {
       if (!mounted) return;
       final msg = e.toString().replaceAll('Exception: ', '').trim();

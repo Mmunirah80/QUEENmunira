@@ -1,5 +1,3 @@
-import 'dart:math' show min;
-
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
@@ -7,11 +5,12 @@ import 'package:uuid/uuid.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../../../core/utils/local_calendar_day_utc_bounds.dart';
 import '../../../customer/data/datasources/customer_orders_supabase_datasource.dart';
+import '../../domain/chef_today_stats_aggregator.dart';
 import '../../domain/entities/chef_today_stats.dart';
 import '../../domain/entities/order_entity.dart';
 import '../models/order_model.dart';
-import '../order_cook_transition.dart';
 import '../order_db_status.dart';
+import '../order_supabase_hydration.dart';
 import 'orders_datasource_exceptions.dart';
 import 'orders_remote_datasource.dart';
 
@@ -32,13 +31,11 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
   final String? chefId;
   final String? customerId;
 
-  static SupabaseClient get _sb => SupabaseConfig.client;
+  static SupabaseClient get _sb => SupabaseConfig.dataClient;
 
   static const _orderSelect =
-      'id,customer_id,customer_name,chef_id,chef_name,status,total_amount,created_at,updated_at,delivery_address,notes,rejection_reason';
-
-  /// PostgREST `in` filter size guard (URL / gateway limits).
-  static const _maxIdsPerInQuery = 50;
+      'id,customer_id,customer_name,chef_id,chef_name,status,total_amount,commission_amount,'
+      'idempotency_key,created_at,updated_at,delivery_address,notes,rejection_reason,cancel_reason';
 
   static const _defaultListLimit = 150;
   static const _maxListLimit = 500;
@@ -47,9 +44,6 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
   static const _maxRejectionReasonLength = 2000;
   static const _maxCreateOrderLineItems = 80;
   static const _maxLineItemQuantity = 999;
-
-  static final DateTime _invalidDateUtc =
-      DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
 
   static final Set<String> _loggedUnknownStatuses = {};
 
@@ -187,6 +181,7 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
     required String chefName,
     required List<Map<String, dynamic>> items,
     required double totalAmount,
+    double commissionAmount = 0,
     String? deliveryAddress,
     String? notes,
     String? idempotencyKey,
@@ -212,7 +207,7 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
         idempotencyKey: key,
         items: items,
         totalAmount: totalAmount,
-        commissionAmount: 0,
+        commissionAmount: commissionAmount,
         deliveryAddress: deliveryAddress,
         notes: notes,
       );
@@ -323,8 +318,8 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
       if ((row['chef_id'] ?? '').toString() != chefId) {
         throw OrderNotFoundException();
       }
-      final from = OrderDbStatus.domainFromDb(row['status']?.toString());
-      if (!OrderCookTransition.canChefAccept(from)) {
+      final rawStatus = row['status']?.toString();
+      if (!OrderDbStatus.canChefAcceptDbStatus(rawStatus)) {
         throw OrdersDataSourceException(
           'Only orders waiting for acceptance can be accepted (current: ${row['status']}).',
         );
@@ -348,17 +343,21 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
       if ((row['chef_id'] ?? '').toString() != chefId) {
         throw OrderNotFoundException();
       }
-      final from = OrderDbStatus.domainFromDb(row['status']?.toString());
-      if (!OrderCookTransition.canChefReject(from)) {
+      final rawReject = row['status']?.toString();
+      if (!OrderDbStatus.canChefRejectDbStatus(rawReject)) {
         throw OrdersDataSourceException(
           'This order cannot be rejected in its current state.',
         );
       }
       final cleanReason = _sanitizeRejectionReason(reason);
       // Cook UI uses reject as a timeout path for unanswered "new" orders.
-      // Map that to the DB terminal `expired` state (not `cancelled_by_cook`).
+      // Map that to unified `cancelled` + system_cancelled_frozen (same customer-facing label as other system cancels).
       if (cleanReason != null && cleanReason == 'Time expired') {
-        await _transitionOrderStatus(id: id, newStatus: 'expired');
+        await _transitionOrderStatus(
+          id: id,
+          newStatus: 'cancelled',
+          cancelReason: OrderDbStatus.internalSystemCancelledFrozen,
+        );
         return;
       }
       await _rejectOrderAtomic(id, cleanReason);
@@ -380,10 +379,10 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
       if ((row['chef_id'] ?? '').toString() != chefId) {
         throw OrderNotFoundException();
       }
-      final from = OrderDbStatus.domainFromDb(row['status']?.toString());
-      if (!OrderCookTransition.isChefAdvance(from, status)) {
+      final rawAdvance = row['status']?.toString();
+      if (!OrderDbStatus.canChefAdvanceDbStatus(rawAdvance, status)) {
         throw OrdersDataSourceException(
-          'Invalid kitchen step: order is $from; use Accept, then advance preparing → ready → completed in order.',
+          'Invalid kitchen step (current: ${row['status']}); use Accept, then advance preparing → ready → completed in order.',
         );
       }
       await _transitionOrderStatus(
@@ -393,48 +392,22 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
     });
   }
 
-  /// Reject uses [transition_order_status] when available so DB rules/audit match the marketplace.
-  /// Optional cook note uses the row's current [updated_at] for optimistic concurrency.
+  /// Reject uses [transition_order_status] (stores optional cook note via [p_rejection_reason] on server).
   Future<void> _rejectOrderAtomic(String id, String? cleanReason) async {
-    await _transitionOrderStatus(id: id, newStatus: 'cancelled_by_cook');
-    if (cleanReason == null) return;
-    try {
-      final row = await _sb
-          .from('orders')
-          .select('updated_at')
-          .eq('id', id)
-          .eq('chef_id', chefId!)
-          .maybeSingle();
-      if (row == null) {
-        throw OrderNotFoundException();
-      }
-      final expected = row['updated_at']?.toString();
-      final nowStr = DateTime.now().toUtc().toIso8601String();
-      final patch = <String, dynamic>{
-        'rejection_reason': cleanReason,
-        'updated_at': nowStr,
-      };
-      var q = _sb.from('orders').update(patch).eq('id', id).eq('chef_id', chefId!);
-      if (expected != null && expected.isNotEmpty) {
-        q = q.eq('updated_at', expected);
-      }
-      final n = await q.select('id').maybeSingle();
-      if (n == null) {
-        throw OrdersDataSourceException(
-          'Order was rejected but your note could not be saved. Refresh and try again.',
-        );
-      }
-    } catch (e, st) {
-      if (e is OrdersDataSourceException) {
-        Error.throwWithStackTrace(e, st);
-      }
-      ordersDataSourceRethrowMapped(e, st, 'rejectOrder.reason');
-    }
+    await _transitionOrderStatus(
+      id: id,
+      newStatus: 'cancelled',
+      cancelReason: OrderDbStatus.internalCookRejected,
+      pRejectionReason: cleanReason,
+    );
   }
 
   Future<void> _transitionOrderStatus({
     required String id,
     required String newStatus,
+    String? cancelReason,
+    bool customerSystemCancel = false,
+    String? pRejectionReason,
   }) async {
     _requireOrderId(id);
     final current = await _sb
@@ -457,6 +430,10 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
           'order_id': id,
           'new_status': newStatus,
           'expected_updated_at': expectedUpdatedAt,
+          if (cancelReason != null) 'cancel_reason': cancelReason,
+          'customer_system_cancel': customerSystemCancel,
+          if (pRejectionReason != null && pRejectionReason.trim().isNotEmpty)
+            'p_rejection_reason': pRejectionReason.trim(),
         },
       );
       return;
@@ -488,6 +465,7 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
 
     final patch = <String, dynamic>{
       'status': newStatus,
+      if (cancelReason != null) 'cancel_reason': cancelReason,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     };
     var q = _sb.from('orders').update(patch).eq('id', id);
@@ -578,12 +556,32 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
     }
     if (ids.isEmpty) return [];
 
-    final itemsByOrder = await _fetchOrderItemsBulk(ids);
+    String? profileKitchenName;
+    if (_hasChefScope && chefId != null && chefId!.isNotEmpty) {
+      try {
+        final pr = await _sb
+            .from('chef_profiles')
+            .select('kitchen_name')
+            .eq('id', chefId!)
+            .maybeSingle();
+        final raw = pr?['kitchen_name']?.toString().trim();
+        if (raw != null && raw.isNotEmpty) profileKitchenName = raw;
+      } catch (e, st) {
+        debugPrint('[OrdersSupabase] kitchen_name fetch: $e\n$st');
+      }
+    }
+
+    final itemsByOrder =
+        await OrderSupabaseHydration.fetchOrderItemsByOrderIds(_sb, ids);
     final out = <OrderModel>[];
     for (final r in rows) {
       final oid = r['id']?.toString();
       if (oid == null || oid.isEmpty) continue;
-      final o = _orderModelFromRow(r, itemsByOrder[oid] ?? const []);
+      final merged = Map<String, dynamic>.from(r);
+      if (profileKitchenName != null) {
+        merged['chef_name'] = profileKitchenName;
+      }
+      final o = _orderModelFromRow(merged, itemsByOrder[oid] ?? const []);
       if (o != null) out.add(o);
     }
     return out;
@@ -605,9 +603,7 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
       }
     }
     final status = OrderDbStatus.domainFromDb(rawStatus);
-    final notes = (status == OrderStatus.cancelled || status == OrderStatus.rejected)
-        ? (r['rejection_reason'] ?? r['notes']) as String?
-        : r['notes'] as String?;
+    final comm = r['commission_amount'];
     return OrderModel(
       id: id,
       customerId: r['customer_id']?.toString(),
@@ -616,77 +612,16 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
       chefName: r['chef_name'] as String?,
       items: items,
       totalAmount: _toDouble(r['total_amount']),
+      commissionAmount:
+          comm == null ? null : OrderSupabaseHydration.toDouble(comm),
       status: status,
-      createdAt: _parseDate(r['created_at']),
+      dbStatus: rawStatus,
+      cancelReason: r['cancel_reason']?.toString(),
+      createdAt: OrderSupabaseHydration.parseOrderDate(r['created_at']),
       deliveryAddress: r['delivery_address'] as String?,
-      notes: notes,
+      notes: OrderSupabaseHydration.resolveOrderNotesFromRow(status, r),
+      idempotencyKey: r['idempotency_key'] as String?,
     );
-  }
-
-  Future<Map<String, List<OrderItemEntity>>> _fetchOrderItemsBulk(
-    List<String> orderIds,
-  ) async {
-    if (orderIds.isEmpty) return {};
-    final list = <dynamic>[];
-    for (var i = 0; i < orderIds.length; i += _maxIdsPerInQuery) {
-      final slice = orderIds.sublist(i, min(i + _maxIdsPerInQuery, orderIds.length));
-      final chunk = await _sb
-          .from('order_items')
-          .select('id,order_id,dish_name,quantity,unit_price,price,menu_item_id')
-          .inFilter('order_id', slice);
-      list.addAll(chunk as List<dynamic>);
-    }
-    final menuIds = <String>[];
-    for (final r in list) {
-      final row = r as Map<String, dynamic>;
-      final menuId = row['menu_item_id']?.toString();
-      if (menuId != null && menuId.isNotEmpty) menuIds.add(menuId);
-    }
-
-    final menuNameById = <String, String>{};
-    if (menuIds.isNotEmpty) {
-      try {
-        final uniqueMenuIds = menuIds.toSet().toList();
-        final menuRowsAccum = <dynamic>[];
-        for (var i = 0; i < uniqueMenuIds.length; i += _maxIdsPerInQuery) {
-          final slice =
-              uniqueMenuIds.sublist(i, min(i + _maxIdsPerInQuery, uniqueMenuIds.length));
-          final part = await _sb.from('menu_items').select('id,name').inFilter('id', slice);
-          menuRowsAccum.addAll(part as List<dynamic>);
-        }
-        for (final r in menuRowsAccum) {
-          if (r is! Map) continue;
-          final m = Map<String, dynamic>.from(r);
-          final kid = m['id']?.toString() ?? '';
-          final nm = m['name']?.toString() ?? '';
-          if (kid.isNotEmpty && nm.isNotEmpty) menuNameById[kid] = nm;
-        }
-      } catch (e, st) {
-        debugPrint('[OrdersSupabase][menu_items bulk] $e\n$st');
-      }
-    }
-
-    final byOrder = <String, List<OrderItemEntity>>{};
-    for (final r in list) {
-      final row = r as Map<String, dynamic>;
-      final oid = row['order_id']?.toString() ?? '';
-      if (oid.isEmpty) continue;
-      final fallbackId = row['menu_item_id']?.toString() ?? '';
-      final name = (row['dish_name'] as String?)?.trim();
-      final resolvedName =
-          (name != null && name.isNotEmpty) ? name : (menuNameById[fallbackId] ?? 'Item');
-      final item = OrderItemModel(
-        id: row['id']?.toString() ?? '',
-        dishName: resolvedName,
-        quantity: (row['quantity'] as num?)?.toInt() ?? 1,
-        price: _toDouble(row['unit_price'] ?? row['price']),
-      );
-      byOrder.putIfAbsent(oid, () => []).add(item);
-    }
-    for (final id in orderIds) {
-      byOrder.putIfAbsent(id, () => []);
-    }
-    return byOrder;
   }
 
   static double _toDouble(dynamic x) {
@@ -694,16 +629,6 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
     if (x is num) return x.toDouble();
     if (x is String) return double.tryParse(x) ?? 0;
     return 0;
-  }
-
-  static DateTime _parseDate(dynamic x) {
-    if (x == null) return _invalidDateUtc;
-    if (x is DateTime) return x.toUtc();
-    if (x is String) {
-      final d = DateTime.tryParse(x);
-      return d != null ? d.toUtc() : _invalidDateUtc;
-    }
-    return _invalidDateUtc;
   }
 
   /// Local calendar day on the device → UTC bounds; filters `orders.created_at`.
@@ -725,29 +650,10 @@ class OrdersSupabaseDataSource implements OrdersRemoteDataSource {
           .eq('chef_id', chefId!)
           .gte('created_at', bounds.startUtc.toIso8601String())
           .lt('created_at', bounds.endUtc.toIso8601String());
-      var completedRev = 0.0;
-      var completedCnt = 0;
-      var kitchenCnt = 0;
-      var pipelineVal = 0.0;
-      for (final r in rows as List) {
-        final row = r as Map<String, dynamic>;
-        final st = row['status']?.toString();
-        final amt = _toDouble(row['total_amount']);
-        if (OrderDbStatus.isCompletedDbStatus(st)) {
-          completedRev += amt;
-          completedCnt++;
-        }
-        if (OrderDbStatus.isInKitchenDbStatus(st)) {
-          kitchenCnt++;
-          pipelineVal += amt;
-        }
-      }
-      return ChefTodayStats(
-        completedRevenueToday: completedRev,
-        completedOrdersToday: completedCnt,
-        inKitchenCountToday: kitchenCnt,
-        pipelineOrderValueToday: pipelineVal,
-      );
+      final list = (rows as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      return aggregateChefTodayStatsFromOrderRows(list);
     });
   }
 

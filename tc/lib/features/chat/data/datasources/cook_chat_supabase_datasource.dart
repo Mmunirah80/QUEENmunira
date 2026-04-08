@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../core/debug/debug_auth_bypass.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../chat_limits.dart';
 import '../models/chat_model.dart';
@@ -21,7 +22,11 @@ class CookChatSupabaseDataSource implements ChatRemoteDataSource {
   CookChatSupabaseDataSource({
     SupabaseClient? client,
     required this.chefId,
-  }) : _client = client ?? SupabaseConfig.client;
+  }) : _client = client ?? SupabaseConfig.dataClient;
+
+  /// Session / debug-bypass user id for this cook (matches [messages.sender_id]).
+  String get _selfId =>
+      (effectiveSupabaseAuthUserId(_client) ?? chefId).trim();
 
   DateTime? _parseDateTime(dynamic v) {
     if (v == null) return null;
@@ -100,7 +105,7 @@ class CookChatSupabaseDataSource implements ChatRemoteDataSource {
       for (final m in recentByConv[conversationId] ?? const []) {
         final senderId = (m['sender_id'] ?? '').toString();
         final isRead = m['is_read'] as bool? ?? false;
-        if (senderId != chefId && !isRead) unreadCount++;
+        if (senderId != _selfId && !isRead) unreadCount++;
       }
 
       result.add(
@@ -180,12 +185,15 @@ class CookChatSupabaseDataSource implements ChatRemoteDataSource {
   @override
   Future<void> sendMessage(String chatId, String content) async {
     final trimmed = content.trim();
-    if (chatId.isEmpty || chefId.isEmpty || trimmed.isEmpty) return;
+    final sid = _selfId;
+    if (chatId.isEmpty || chefId.isEmpty || sid.isEmpty || trimmed.isEmpty) {
+      return;
+    }
     final now = DateTime.now().toUtc().toIso8601String();
-    debugPrint('[CookChat] sendMessage chatId=$chatId chefId=$chefId');
+    debugPrint('[CookChat] sendMessage chatId=$chatId senderId=$sid');
     await _messages.insert({
       'conversation_id': chatId,
-      'sender_id': chefId,
+      'sender_id': sid,
       'content': trimmed,
       'is_read': false,
       'created_at': now,
@@ -199,7 +207,7 @@ class CookChatSupabaseDataSource implements ChatRemoteDataSource {
     await _messages
         .update({'is_read': true})
         .eq('conversation_id', chatId)
-        .neq('sender_id', chefId);
+        .neq('sender_id', _selfId);
   }
 
   Future<String> _existingThreadId(String customerId) async {

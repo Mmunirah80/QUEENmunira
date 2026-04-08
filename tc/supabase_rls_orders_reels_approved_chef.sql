@@ -28,11 +28,12 @@ CREATE POLICY orders_insert_customer
         AND cp.approval_status = 'approved'
         AND COALESCE (cp.suspended, false) = false
         AND COALESCE (cp.is_online, false) = true
+        AND (cp.freeze_until IS NULL OR cp.freeze_until <= now())
     )
   );
 
 COMMENT ON POLICY orders_insert_customer ON public.orders IS
-  'Customers may only place orders with chefs who are approved, not suspended, and online.';
+  'Customers may only place orders with approved, non-suspended, online cooks who are not in an active freeze.';
 
 -- ─── Reels: insert only if chef is approved + not suspended ───
 -- Idempotent: safe to re-run after a previous apply (42710 if missing DROP).
@@ -55,6 +56,9 @@ CREATE POLICY reels_insert_approved_chef
   );
 
 -- ─── Reels: feed visible to others only for approved chefs; owner + admin always ───
+-- NOTE: This SELECT policy is REPLACED by supabase_reels_visibility_independent.sql
+--       so reels stay visible when chef storefront / approval / suspension changes
+--       (visibility = reel is_active + not deleted + not is_hidden only).
 
 DROP POLICY IF EXISTS reels_select_visibility ON public.reels;
 DROP POLICY IF EXISTS reels_select_all ON public.reels;

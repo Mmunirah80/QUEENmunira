@@ -18,6 +18,7 @@ class ReelModel extends ReelEntity {
     super.commentsCount,
     required super.createdAt,
     super.isLiked,
+    super.chefOrderingDisabled = false,
   });
 
   /// Builds from a map (e.g. Supabase row or JSON). [id] required if not in data. [currentUserId] used to set [isLiked].

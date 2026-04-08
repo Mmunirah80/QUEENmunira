@@ -4,11 +4,16 @@
 --
 -- Threads: type = 'chef-admin', chef_id = cook, customer_id = cook
 -- (same uuid satisfies participant RLS for the cook; admin writes via policies below.)
+--
+-- Deployment: policies use TO authenticated (matches supabase_chat_admin_messages.sql).
+-- If you also run supabase_chat_admin_messages.sql, it redefines messages_insert_admin
+-- with the same rules — run either file last; both are idempotent for that policy name.
 -- ============================================================
 
 DROP POLICY IF EXISTS conversations_insert_admin ON public.conversations;
+
 CREATE POLICY conversations_insert_admin
-  ON public.conversations FOR INSERT
+  ON public.conversations FOR INSERT TO authenticated
   WITH CHECK (
     public.is_admin ()
     AND type = 'chef-admin'
@@ -17,8 +22,9 @@ CREATE POLICY conversations_insert_admin
   );
 
 DROP POLICY IF EXISTS messages_insert_admin ON public.messages;
+
 CREATE POLICY messages_insert_admin
-  ON public.messages FOR INSERT
+  ON public.messages FOR INSERT TO authenticated
   WITH CHECK (
     public.is_admin ()
     AND sender_id = auth.uid ()
@@ -30,4 +36,7 @@ CREATE POLICY messages_insert_admin
   );
 
 COMMENT ON POLICY conversations_insert_admin ON public.conversations IS
-  'Allows admins to open chef-admin support threads.';
+  'Allows admins to open chef-admin support threads (customer_id = chef_id).';
+
+COMMENT ON POLICY messages_insert_admin ON public.messages IS
+  'Admins may insert messages when sender is self; conversation must exist.';

@@ -53,6 +53,7 @@ class AuthMockDataSource implements AuthRemoteDataSource {
       phone: '+1234567890',
       isVerified: true,
       role: role ?? AppRole.chef,
+      chefAccessLevel: isChef ? ChefAccessLevel.fullAccess : null,
       chefApprovalStatus: isChef ? ChefApprovalStatus.approved : null,
     );
     await _persistUser(_currentUser);
@@ -86,6 +87,8 @@ class AuthMockDataSource implements AuthRemoteDataSource {
       name: name,
       phone: phone,
       role: effectiveRole,
+      chefAccessLevel:
+          effectiveRole == AppRole.chef ? ChefAccessLevel.partialAccess : null,
       chefApprovalStatus:
           effectiveRole == AppRole.chef ? ChefApprovalStatus.pending : null,
     );

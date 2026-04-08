@@ -22,6 +22,7 @@ import 'package:naham_cook_app/core/widgets/naham_app_header.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
 import 'package:naham_cook_app/core/widgets/naham_empty_screens.dart';
 import 'package:naham_cook_app/features/reels/domain/entities/reel_entity.dart';
+import 'package:naham_cook_app/features/customer/screens/customer_chat_screen.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_order_details_screen.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_search_screen.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
@@ -30,9 +31,11 @@ import 'package:naham_cook_app/features/auth/presentation/providers/auth_provide
 import 'package:naham_cook_app/features/auth/screens/login_screen.dart';
 import 'package:naham_cook_app/features/customer/screens/customer_reels_feed.dart';
 import 'package:naham_cook_app/features/menu/domain/entities/dish_entity.dart';
+import 'package:naham_cook_app/features/orders/data/order_db_status.dart';
 import 'package:naham_cook_app/features/orders/domain/entities/order_entity.dart';
 import 'package:naham_cook_app/features/orders/presentation/providers/orders_provider.dart';
 import 'package:naham_cook_app/features/orders/presentation/widgets/orders_stream_error_panel.dart';
+import 'package:naham_cook_app/features/customer/widgets/pending_chef_response_countdown.dart';
 import 'package:naham_cook_app/features/customer/widgets/skeleton_box.dart';
 import 'package:naham_cook_app/features/customer/widgets/press_scale.dart';
 
@@ -1241,18 +1244,6 @@ class _OrderCard extends StatelessWidget {
 
   const _OrderCard({required this.order, required this.onTap});
 
-  static String _statusLabel(OrderStatus status) {
-    switch (status) {
-      case OrderStatus.pending: return 'Pending';
-      case OrderStatus.accepted: return 'Accepted';
-      case OrderStatus.rejected: return 'Rejected';
-      case OrderStatus.preparing: return 'Preparing';
-      case OrderStatus.ready: return 'Ready';
-      case OrderStatus.completed: return 'Completed';
-      case OrderStatus.cancelled: return 'Cancelled';
-    }
-  }
-
   static Color _statusColor(OrderStatus status) {
     switch (status) {
       case OrderStatus.pending: return NahamCustomerColors.primary;
@@ -1303,7 +1294,11 @@ class _OrderCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    _statusLabel(order.status),
+                    OrderDbStatus.customerFacingLabel(
+                      order.dbStatus,
+                      cancelReason: order.cancelReason,
+                      orderStatusFallback: order.status,
+                    ),
                     style: TextStyle(color: _statusColor(order.status), fontSize: 12, fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -1351,6 +1346,14 @@ class _OrderCard extends StatelessWidget {
                 ),
               ],
             ),
+            if (order.status == OrderStatus.pending) ...[
+              const SizedBox(height: 8),
+              PendingChefResponseCountdown(
+                createdAtUtc: order.createdAt,
+                strongColor: NahamCustomerColors.primary,
+                mutedColor: NahamCustomerColors.textGrey,
+              ),
+            ],
           ],
         ),
       ),
@@ -1359,456 +1362,7 @@ class _OrderCard extends StatelessWidget {
 }
 
 // ==================== CHAT SCREEN ====================
-class NahamCustomerChatScreen extends ConsumerStatefulWidget {
-  const NahamCustomerChatScreen({super.key});
-
-  @override
-  ConsumerState<NahamCustomerChatScreen> createState() => _NahamCustomerChatScreenState();
-}
-
-class _NahamCustomerChatScreenState extends ConsumerState<NahamCustomerChatScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Directionality(
-      textDirection: TextDirection.ltr,
-      child: Scaffold(
-        backgroundColor: NahamCustomerColors.background,
-        appBar: AppBar(
-          backgroundColor: NahamCustomerColors.primary,
-          foregroundColor: Colors.white,
-          centerTitle: false,
-          titleSpacing: 12,
-          title: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Image.asset(
-                NahamCustomerColors.logoAsset,
-                width: 28,
-                height: 28,
-                fit: BoxFit.contain,
-                errorBuilder: (_, __, ___) => const Icon(Icons.restaurant_rounded, color: Colors.white, size: 28),
-              ),
-              const SizedBox(width: 8),
-              const Text('Naham', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
-            ],
-          ),
-          bottom: TabBar(
-            controller: _tabController,
-            indicatorColor: Colors.white,
-            labelColor: Colors.white,
-            unselectedLabelColor: Colors.white70,
-            tabs: const [
-              Tab(text: 'Cook Chat'),
-              Tab(text: 'Support'),
-            ],
-          ),
-        ),
-        body: TabBarView(
-          controller: _tabController,
-          children: [
-            _buildChatList('customer-chef'),
-            _buildChatList('customer-support'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildChatList(String type) {
-    final customerId = ref.watch(customerIdProvider);
-    print('Chat screen opened, customerId: $customerId');
-    final stream = type == 'customer-chef'
-        ? ref.watch(customerChefChatsStreamProvider)
-        : ref.watch(customerSupportChatsStreamProvider);
-    return stream.when(
-      data: (chats) {
-        print('Chat customerID: ${ref.read(customerIdProvider)}');
-        print('Conversations loaded: ${chats.length}');
-        print('Conversation types: ${chats.map((c) => c['type']).toList()}');
-        if (chats.isEmpty) {
-          return Center(
-            child: EmptyChatContent(
-              title: 'No conversations yet',
-              subtitle: type == 'customer-chef'
-                  ? 'When you order from cooks, conversations will appear here.'
-                  : 'Support conversations will appear here.',
-            ),
-          );
-        }
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: chats.length,
-          itemBuilder: (_, i) {
-            final chat = chats[i];
-            final name = chat['otherParticipantName'] as String? ?? '—';
-            final last = chat['lastMessage'] as String? ?? '';
-            final at = chat['lastMessageAt'];
-            String timeStr = '—';
-            if (at is DateTime) {
-              timeStr = '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
-            }
-            return InkWell(
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                  builder: (_) => NahamCustomerChatConversationScreen(
-                    chatId: chat['id'] as String,
-                    name: name,
-                  ),
-                ),
-              ),
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: NahamCustomerColors.cardBg,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.06),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 50,
-                      height: 50,
-                      decoration: BoxDecoration(
-                        color: NahamCustomerColors.primaryLight.withValues(alpha: 0.4),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.person, color: NahamCustomerColors.primaryDark),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                          Text(
-                            last.isEmpty ? 'No messages' : last,
-                            style: const TextStyle(color: NahamCustomerColors.textGrey, fontSize: 12),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    Text(timeStr, style: const TextStyle(color: NahamCustomerColors.textGrey, fontSize: 11)),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-      loading: () => const Center(child: CircularProgressIndicator(color: NahamCustomerColors.primary)),
-      error: (e, _) => Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Error: ${userFriendlyErrorMessage(e)}', textAlign: TextAlign.center, style: const TextStyle(color: NahamCustomerColors.textGrey)),
-            const SizedBox(height: 12),
-            TextButton(
-              onPressed: () {
-                ref.invalidate(customerChefChatsStreamProvider);
-                ref.invalidate(customerSupportChatsStreamProvider);
-              },
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ==================== CHAT CONVERSATION SCREEN ====================
-class NahamCustomerChatConversationScreen extends ConsumerStatefulWidget {
-  final String chatId;
-  final String name;
-
-  const NahamCustomerChatConversationScreen({super.key, required this.chatId, required this.name});
-
-  @override
-  ConsumerState<NahamCustomerChatConversationScreen> createState() =>
-      _NahamCustomerChatConversationScreenState();
-}
-
-class _NahamCustomerChatConversationScreenState
-    extends ConsumerState<NahamCustomerChatConversationScreen> {
-  final _ctrl = TextEditingController();
-  final _scrollCtrl = ScrollController();
-  bool _sending = false;
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    _scrollCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _send() async {
-    final text = _ctrl.text.trim();
-    if (text.isEmpty) return;
-    final uid = ref.read(customerIdProvider);
-    if (uid.isEmpty) return;
-    if (_sending) return;
-    setState(() => _sending = true);
-    try {
-      await ref.read(customerChatSupabaseDataSourceProvider).sendMessage(
-            conversationId: widget.chatId,
-            senderId: uid,
-            content: text,
-          );
-      _ctrl.clear();
-      Future<void>.delayed(const Duration(milliseconds: 150), () {
-        if (_scrollCtrl.hasClients) {
-          _scrollCtrl.animateTo(
-            _scrollCtrl.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
-    } catch (e) {
-      if (mounted) {
-        SnackbarHelper.error(
-          context,
-          userFriendlyErrorMessage(
-            e,
-            fallback: 'Failed to send message. Please try again.',
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
-  static String _formatTime(dynamic at) {
-    if (at == null) return '—';
-    if (at is String) {
-      try {
-        final d = DateTime.parse(at);
-        return '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-      } catch (_) {
-        return at;
-      }
-    }
-    return '—';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final uid = ref.watch(customerIdProvider);
-    final messagesAsync = ref.watch(customerChatMessagesStreamProvider(widget.chatId));
-
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        backgroundColor: NahamCustomerColors.background,
-        appBar: AppBar(
-          backgroundColor: NahamCustomerColors.primary,
-          foregroundColor: Colors.white,
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back_rounded),
-            onPressed: () => Navigator.pop(context),
-          ),
-          title: Text(widget.name),
-        ),
-        body: Column(
-          children: [
-            Expanded(
-              child: messagesAsync.when(
-                data: (messages) {
-                  if (messages.isEmpty) {
-                    return const Center(
-                      child: Text(
-                        'No messages yet. Start the conversation.',
-                        style: TextStyle(color: NahamCustomerColors.textGrey),
-                      ),
-                    );
-                  }
-                  return ListView.builder(
-                    controller: _scrollCtrl,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: messages.length,
-                    itemBuilder: (ctx, i) {
-                      final msg = messages[i];
-                      final senderId = msg['senderId'] as String? ?? '';
-                      final isMe = senderId == uid;
-                      final content = msg['content'] as String? ?? '';
-                      final time = _formatTime(msg['createdAt']);
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: Row(
-                          mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-                          children: [
-                            Flexible(
-                              child: Column(
-                                crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                    decoration: BoxDecoration(
-                                      color: isMe
-                                          ? NahamCustomerColors.primary
-                                          : NahamCustomerColors.cardBg,
-                                      borderRadius: BorderRadius.only(
-                                        topLeft: const Radius.circular(18),
-                                        topRight: const Radius.circular(18),
-                                        bottomLeft: Radius.circular(isMe ? 18 : 4),
-                                        bottomRight: Radius.circular(isMe ? 4 : 18),
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withValues(alpha: 0.06),
-                                          blurRadius: 6,
-                                          offset: const Offset(0, 2),
-                                        ),
-                                      ],
-                                    ),
-                                    child: Text(
-                                      content,
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        color: isMe ? Colors.white : NahamCustomerColors.textDark,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    time,
-                                    style: const TextStyle(color: NahamCustomerColors.textGrey, fontSize: 11),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  );
-                },
-                loading: () => const Center(child: CircularProgressIndicator(color: NahamCustomerColors.primary)),
-                error: (e, _) => Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          userFriendlyErrorMessage(
-                            e,
-                            fallback: 'Could not load messages. Check your connection.',
-                          ),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: NahamCustomerColors.textGrey),
-                        ),
-                        const SizedBox(height: 16),
-                        TextButton(
-                          onPressed: () =>
-                              ref.invalidate(customerChatMessagesStreamProvider(widget.chatId)),
-                          child: const Text('Retry'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Container(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
-              decoration: BoxDecoration(
-                color: NahamCustomerColors.cardBg,
-                border: Border(top: BorderSide(color: NahamCustomerColors.primary.withValues(alpha: 0.2))),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _ctrl,
-                      enabled: !_sending,
-                      textDirection: TextDirection.rtl,
-                      decoration: InputDecoration(
-                        hintText: 'Type a message...',
-                        hintStyle: const TextStyle(color: NahamCustomerColors.textGrey, fontSize: 14),
-                        filled: true,
-                        fillColor: NahamCustomerColors.background,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      ),
-                      onSubmitted: (_) => _send(),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: _sending ? null : _send,
-                    child: PressScale(
-                      enabled: !_sending,
-                      child: Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          color: NahamCustomerColors.primary,
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: NahamCustomerColors.primary.withValues(alpha: 0.3),
-                              blurRadius: 8,
-                              offset: const Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: _sending
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(
-                                Icons.send_rounded,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+// [NahamCustomerChatScreen] lives in `customer_chat_screen.dart` (single inbox + conversation UI).
 
 // ==================== PROFILE SCREEN ====================
 class NahamCustomerProfileScreen extends ConsumerWidget {
@@ -1967,20 +1521,6 @@ class NahamCustomerProfileScreen extends ConsumerWidget {
           ),
           _optionCard(
             context: context,
-            icon: Icons.location_on_outlined,
-            title: 'Addresses',
-            subtitle: 'Delivery addresses',
-            onTap: () => Navigator.push(
-              context,
-              PageRouteBuilder<void>(
-                pageBuilder: (context, animation, secondaryAnimation) => const NahamCustomerAddressesScreen(),
-                transitionsBuilder: (context, animation, secondaryAnimation, child) => FadeTransition(opacity: animation, child: child),
-                transitionDuration: const Duration(milliseconds: 300),
-              ),
-            ),
-          ),
-          _optionCard(
-            context: context,
             icon: Icons.favorite_border,
             title: 'Favorites',
             subtitle: 'My favorite dishes',
@@ -2115,7 +1655,7 @@ class _NahamCustomerEditProfileScreenState
   void initState() {
     super.initState();
     final user = ref.read(authStateProvider).valueOrNull;
-    _nameCtrl = TextEditingController(text: user?.name ?? 'Test Customer');
+    _nameCtrl = TextEditingController(text: (user?.name ?? '').trim());
     _phoneCtrl = TextEditingController(text: user?.phone ?? '');
     _profileImageUrl = user?.profileImageUrl;
   }
@@ -2578,266 +2118,6 @@ class NahamCustomerNotificationsScreen extends ConsumerWidget {
           error: (e, _) => Center(child: Text('Error: ${userFriendlyErrorMessage(e)}', style: const TextStyle(color: NahamCustomerColors.textGrey))),
         ),
     );
-  }
-}
-
-// ==================== ADDRESSES SCREEN ====================
-class NahamCustomerAddressesScreen extends ConsumerWidget {
-  const NahamCustomerAddressesScreen({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final addressesAsync = ref.watch(customerAddressesStreamProvider);
-    final uid = ref.watch(customerIdProvider);
-
-    return Scaffold(
-      backgroundColor: NahamCustomerColors.background,
-      appBar: AppBar(
-        backgroundColor: NahamCustomerColors.primary,
-        foregroundColor: Colors.white,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: const Text('My Addresses'),
-      ),
-      body: addressesAsync.when(
-          data: (list) {
-            if (list.isEmpty) {
-              return Center(
-                child: NahamEmptyStateContent(
-                  title: 'No addresses',
-                  subtitle: 'Add a delivery address',
-                  buttonLabel: 'OK',
-                  fallbackIcon: Icons.location_off_rounded,
-                ),
-              );
-            }
-            return ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: list.length + 1,
-              itemBuilder: (context, index) {
-                if (index == list.length) {
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: () => _openAddressForm(context, ref, uid: uid),
-                        icon: const Icon(Icons.add_rounded, color: NahamCustomerColors.primary),
-                        label: const Text('Add address', style: TextStyle(color: NahamCustomerColors.primary, fontWeight: FontWeight.w600)),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: NahamCustomerColors.primary),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                        ),
-                      ),
-                    ),
-                  );
-                }
-                final a = list[index];
-                final id = a['id'] as String? ?? '';
-                final label = a['label'] as String? ?? '';
-                final street = a['street'] as String? ?? '';
-                final city = a['city'] as String?;
-                final phone = a['phone'] as String?;
-                final isDefault = a['isDefault'] as bool? ?? false;
-                final addressLine = [street, if (city != null && city.isNotEmpty) city].join(', ');
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: NahamCustomerColors.cardBg,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.06),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          color: NahamCustomerColors.primary.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(Icons.location_on_rounded, color: NahamCustomerColors.primary, size: 22),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Text(
-                                  label,
-                                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-                                ),
-                                if (isDefault) ...[
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: NahamCustomerColors.primaryLight,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: const Text('Default', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: NahamCustomerColors.primary)),
-                                  ),
-                                ],
-                              ],
-                            ),
-                            Text(
-                              addressLine,
-                              style: const TextStyle(color: NahamCustomerColors.textGrey, fontSize: 13),
-                            ),
-                            if (phone != null && phone.isNotEmpty)
-                              Text(
-                                phone,
-                                style: const TextStyle(color: NahamCustomerColors.textGrey, fontSize: 12),
-                              ),
-                          ],
-                        ),
-                      ),
-                      if (!isDefault && uid.isNotEmpty)
-                        IconButton(
-                          icon: const Icon(Icons.check_circle_outline, color: NahamCustomerColors.primary),
-                          onPressed: () => ref.read(customerFirebaseDataSourceProvider).setDefaultAddress(uid, id),
-                          tooltip: 'Set as default',
-                        ),
-                      IconButton(
-                        icon: const Icon(Icons.edit_outlined, color: NahamCustomerColors.primary),
-                        onPressed: () => _openAddressForm(context, ref, uid: uid, address: a),
-                      ),
-                      if (uid.isNotEmpty)
-                        IconButton(
-                          icon: const Icon(Icons.delete_outline, color: AppDesignSystem.errorRed),
-                          onPressed: () async {
-                            final confirm = await showDialog<bool>(
-                              context: context,
-                              builder: (ctx) => AlertDialog(
-                                title: const Text('Delete address'),
-                                content: const Text('Do you want to delete this address?'),
-                                actions: [
-                                  TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-                                  TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
-                                ],
-                              ),
-                            );
-                            if (confirm == true) {
-                              await ref.read(customerFirebaseDataSourceProvider).deleteAddress(uid, id);
-                            }
-                          },
-                        ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-          loading: () => const Center(child: CircularProgressIndicator(color: NahamCustomerColors.primary)),
-          error: (e, _) => Center(child: Text('Error: ${userFriendlyErrorMessage(e)}', style: const TextStyle(color: NahamCustomerColors.textGrey))),
-        ),
-    );
-  }
-
-  static void _openAddressForm(
-    BuildContext context,
-    WidgetRef ref, {
-    required String uid,
-    Map<String, dynamic>? address,
-  }) {
-    if (uid.isEmpty) return;
-    final isEdit = address != null;
-    final id = address?['id'] as String?;
-    final labelCtrl = TextEditingController(text: address?['label'] as String? ?? '');
-    final streetCtrl = TextEditingController(text: address?['street'] as String? ?? '');
-    final cityCtrl = TextEditingController(text: address?['city'] as String? ?? '');
-    final phoneCtrl = TextEditingController(text: address?['phone'] as String? ?? '');
-    bool isDefault = address?['isDefault'] as bool? ?? false;
-
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => Container(
-        padding: EdgeInsets.only(left: 24, right: 24, top: 24, bottom: MediaQuery.of(ctx).viewInsets.bottom + 24),
-          decoration: const BoxDecoration(
-            color: NahamCustomerColors.cardBg,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          child: StatefulBuilder(
-            builder: (ctx2, setModalState) {
-              return SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(isEdit ? 'Edit address' : 'Add address', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 16),
-                    TextField(controller: labelCtrl, decoration: const InputDecoration(labelText: 'Label (e.g. Home)')),
-                    const SizedBox(height: 12),
-                    TextField(controller: streetCtrl, decoration: const InputDecoration(labelText: 'Street / Address')),
-                    const SizedBox(height: 12),
-                    TextField(controller: cityCtrl, decoration: const InputDecoration(labelText: 'City')),
-                    const SizedBox(height: 12),
-                    TextField(controller: phoneCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Phone')),
-                    const SizedBox(height: 12),
-                    CheckboxListTile(
-                      title: const Text('Set as default address'),
-                      value: isDefault,
-                      onChanged: (v) => setModalState(() => isDefault = v ?? false),
-                      controlAffinity: ListTileControlAffinity.leading,
-                    ),
-                    const SizedBox(height: 20),
-                    ElevatedButton(
-                      onPressed: () async {
-                        final label = labelCtrl.text.trim();
-                        final street = streetCtrl.text.trim();
-                        if (label.isEmpty || street.isEmpty) {
-                          SnackbarHelper.error(context, 'Please enter label and street');
-                          return;
-                        }
-                        try {
-                          if (isEdit && id != null) {
-                            await ref.read(customerFirebaseDataSourceProvider).updateAddress(uid, id, label: label, street: street, city: cityCtrl.text.trim().isEmpty ? null : cityCtrl.text.trim(), phone: phoneCtrl.text.trim().isEmpty ? null : phoneCtrl.text.trim(), isDefault: isDefault ? true : null);
-                          } else {
-                            await ref.read(customerFirebaseDataSourceProvider).addAddress(uid, label: label, street: street, city: cityCtrl.text.trim().isEmpty ? null : cityCtrl.text.trim(), phone: phoneCtrl.text.trim().isEmpty ? null : phoneCtrl.text.trim(), isDefault: isDefault);
-                          }
-                          if (ctx.mounted) {
-                            SnackbarHelper.success(context, isEdit ? 'Address updated' : 'Address added');
-                            Navigator.pop(ctx);
-                          }
-                        } catch (e) {
-                          debugPrint('[AddressForm] Error: $e');
-                          if (context.mounted) {
-                            SnackbarHelper.error(context, userFriendlyErrorMessage(e));
-                          }
-                        }
-                      },
-                      style: ElevatedButton.styleFrom(backgroundColor: NahamCustomerColors.primary, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14)),
-                      child: Text(isEdit ? 'Save' : 'Add'),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-    ).then((_) {
-      labelCtrl.dispose();
-      streetCtrl.dispose();
-      cityCtrl.dispose();
-      phoneCtrl.dispose();
-    });
   }
 }
 

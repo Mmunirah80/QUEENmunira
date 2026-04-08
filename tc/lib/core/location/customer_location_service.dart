@@ -35,18 +35,25 @@ class CustomerLocationService {
   }
 
   /// Rich labels for pickup header: [shortLabel] compact, [detailLine] broader (region / country).
-  static Future<({String shortLabel, String detailLine})> pickupGeocodeLabels(double lat, double lng) async {
+  /// [localityCity] is used to match [chef_profiles.kitchen_city] (same logic as [normalizeSaudiCityKey] in pickup_distance).
+  static Future<({String shortLabel, String detailLine, String? localityCity})> pickupGeocodeLabels(double lat, double lng) async {
     if (kIsWeb) {
       final region = _webRegionHint(lat, lng);
+      final city = _parseCityHintFromWebRegion(region);
       return (
         shortLabel: region,
         detailLine: '$region · ${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)} (browser — drag the map pin to refine)',
+        localityCity: city,
       );
     }
     try {
       final marks = await placemarkFromCoordinates(lat, lng);
       if (marks.isEmpty) {
-        return (shortLabel: 'Your area', detailLine: 'Location saved · ${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}');
+        return (
+          shortLabel: 'Saved pin',
+          detailLine: 'Location saved · ${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}',
+          localityCity: null,
+        );
       }
       final p = marks.first;
       final sub = (p.subLocality ?? '').trim();
@@ -60,7 +67,7 @@ class CustomerLocationService {
       if (loc.isNotEmpty) shortParts.add(loc);
       if (shortParts.isEmpty && name.isNotEmpty) shortParts.add(name);
       if (shortParts.isEmpty && adm.isNotEmpty) shortParts.add(adm);
-      final shortLabel = shortParts.isEmpty ? 'Your area' : shortParts.join(', ');
+      final shortLabel = shortParts.isEmpty ? 'Saved pin' : shortParts.join(', ');
 
       final detailParts = <String>[];
       if (sub.isNotEmpty) detailParts.add(sub);
@@ -71,13 +78,24 @@ class CustomerLocationService {
       if (detailLine == shortLabel && country.isEmpty && adm.isNotEmpty) {
         detailLine = '$shortLabel · $adm';
       }
-      return (shortLabel: shortLabel, detailLine: detailLine);
+      final localityCity = loc.isNotEmpty ? loc : (adm.isNotEmpty ? adm : null);
+      return (shortLabel: shortLabel, detailLine: detailLine, localityCity: localityCity);
     } catch (_) {
       return (
-        shortLabel: 'Your area',
+        shortLabel: 'Saved pin',
         detailLine: 'Location saved · ${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}',
+        localityCity: null,
       );
     }
+  }
+
+  /// Rough city hint for web when only [region] string is available.
+  static String? _parseCityHintFromWebRegion(String region) {
+    final r = region.toLowerCase();
+    if (r.contains('riyadh')) return 'Riyadh';
+    if (r.contains('makkah') || r.contains('taif')) return 'Jeddah';
+    if (r.contains('eastern')) return 'Dammam';
+    return null;
   }
 
   /// Coarse hint when reverse-geocode is unavailable on web (Chrome, etc.).

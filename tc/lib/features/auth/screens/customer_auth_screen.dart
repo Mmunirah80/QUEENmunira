@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../core/constants/route_names.dart';
 import '../../../core/theme/naham_theme.dart';
+import '../../../core/validation/naham_validators.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/theme/app_design_system.dart';
-import '../../customer/naham_customer_screens.dart';
 import '../domain/entities/user_entity.dart';
 import '../presentation/providers/auth_provider.dart';
+import 'forgot_password_screen.dart';
 
 /// Customer auth: Login | Register. After submit → Customer app (purple Naham UI).
 class CustomerAuthScreen extends ConsumerStatefulWidget {
@@ -54,13 +58,13 @@ class _CustomerAuthScreenState extends ConsumerState<CustomerAuthScreen> {
           password: _passwordController.text,
           name: _nameController.text.trim(),
           phone: _phoneController.text.trim().isEmpty ? null : _phoneController.text.trim(),
+          role: AppRole.customer,
         );
       }
       if (!mounted) return;
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const MainNavigationScreen()),
-        (route) => false,
-      );
+      ref.read(selectedRoleProvider.notifier).state = AppRole.customer;
+      debugPrint('[ROUTER] CustomerAuthScreen ${_isLogin ? "login" : "signup"} ok -> splash');
+      context.go(RouteNames.splash);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -115,6 +119,20 @@ class _CustomerAuthScreenState extends ConsumerState<CustomerAuthScreen> {
                   const SizedBox(height: 16),
                 ],
                 _buildPasswordField(),
+                if (_isLogin) ...[
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: () {
+                        Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(builder: (_) => const ForgotPasswordScreen()),
+                        );
+                      },
+                      style: TextButton.styleFrom(foregroundColor: _primary),
+                      child: const Text('Forgot password?'),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 32),
                 _buildSubmitButton(),
                 const SizedBox(height: 24),
@@ -175,8 +193,9 @@ class _CustomerAuthScreenState extends ConsumerState<CustomerAuthScreen> {
   Widget _buildNameField() {
     return TextFormField(
       controller: _nameController,
+      textCapitalization: TextCapitalization.words,
       decoration: _inputDecoration('Full Name'),
-      validator: (v) => (v == null || v.trim().isEmpty) ? 'Required' : null,
+      validator: NahamValidators.personOrDishName,
       textInputAction: TextInputAction.next,
     );
   }
@@ -186,11 +205,10 @@ class _CustomerAuthScreenState extends ConsumerState<CustomerAuthScreen> {
       controller: _emailController,
       keyboardType: TextInputType.emailAddress,
       decoration: _inputDecoration('Email'),
-      validator: (v) {
-        if (v == null || v.trim().isEmpty) return 'Required';
-        if (!v.contains('@')) return 'Enter a valid email';
-        return null;
-      },
+      validator: (v) => NahamValidators.email(
+        v,
+        invalidMessage: 'Enter a valid email',
+      ),
       textInputAction: TextInputAction.next,
     );
   }
@@ -199,8 +217,11 @@ class _CustomerAuthScreenState extends ConsumerState<CustomerAuthScreen> {
     return TextFormField(
       controller: _phoneController,
       keyboardType: TextInputType.phone,
+      inputFormatters: <TextInputFormatter>[
+        FilteringTextInputFormatter.allow(RegExp(r'[\d+\s\-()]')),
+      ],
       decoration: _inputDecoration('Phone'),
-      validator: (v) => (v == null || v.trim().isEmpty) ? 'Required' : null,
+      validator: (v) => NahamValidators.phoneDigits(v, requiredField: true),
       textInputAction: TextInputAction.next,
     );
   }

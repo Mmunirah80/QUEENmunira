@@ -9,6 +9,7 @@ class UserModel extends UserEntity {
     super.profileImageUrl,
     super.isVerified,
     super.role,
+    super.chefAccessLevel,
     super.chefApprovalStatus,
     super.rejectionReason,
     super.isBlocked,
@@ -22,9 +23,14 @@ class UserModel extends UserEntity {
     if (roleStr == 'admin') role = AppRole.admin;
     ChefApprovalStatus? status;
     final statusStr = json['chefApprovalStatus'] as String?;
-    if (statusStr == 'pending') status = ChefApprovalStatus.pending;
+    if (statusStr == 'pending' || statusStr == 'waiting') status = ChefApprovalStatus.pending;
     if (statusStr == 'approved') status = ChefApprovalStatus.approved;
     if (statusStr == 'rejected') status = ChefApprovalStatus.rejected;
+    ChefAccessLevel? al;
+    final als = json['chefAccessLevel'] as String?;
+    if (als == 'partialAccess') al = ChefAccessLevel.partialAccess;
+    if (als == 'fullAccess') al = ChefAccessLevel.fullAccess;
+    if (als == 'blockedAccess') al = ChefAccessLevel.blockedAccess;
     return UserModel(
       id: json['id'] as String,
       email: json['email'] as String,
@@ -33,6 +39,7 @@ class UserModel extends UserEntity {
       profileImageUrl: json['profileImageUrl'] as String?,
       isVerified: json['isVerified'] as bool? ?? false,
       role: role,
+      chefAccessLevel: al,
       chefApprovalStatus: status,
       rejectionReason: json['rejectionReason'] as String?,
       isBlocked: json['isBlocked'] as bool? ?? false,
@@ -48,6 +55,7 @@ class UserModel extends UserEntity {
       'profileImageUrl': profileImageUrl,
       'isVerified': isVerified,
       'role': role?.name,
+      'chefAccessLevel': chefAccessLevel?.name,
       'chefApprovalStatus': chefApprovalStatus?.name,
       'rejectionReason': rejectionReason,
       'isBlocked': isBlocked,

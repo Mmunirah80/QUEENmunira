@@ -2,23 +2,21 @@
 -- Repair invalid message.sender_id values
 -- ============================================================
 -- Replaces any messages.sender_id that does NOT exist in profiles.id
--- with the real support admin account id.
---
--- Admin account:
---   a3291c54-3ee6-4d61-8aea-62d3ff5c5657
+-- with **an active admin** from public.profiles (role = admin, not blocked).
+-- No hardcoded UUID — works across environments.
 -- ============================================================
 
 begin;
 
--- Safety check: ensure the target admin user exists in profiles.
 do $$
 begin
   if not exists (
     select 1
-    from public.profiles
-    where id = 'a3291c54-3ee6-4d61-8aea-62d3ff5c5657'::uuid
+    from public.profiles p
+    where lower(trim(p.role::text)) = 'admin'
+      and (p.is_blocked is null or p.is_blocked = false)
   ) then
-    raise exception 'Admin profile not found for id %', 'a3291c54-3ee6-4d61-8aea-62d3ff5c5657';
+    raise exception 'No active admin profile (role=admin, not blocked) in public.profiles; cannot repair senders.';
   end if;
 end $$;
 
@@ -31,9 +29,17 @@ left join public.profiles p
 where m.sender_id is null
    or p.id is null;
 
--- Apply fix.
+-- Apply fix: attribute orphaned senders to the chosen admin row above.
 update public.messages m
-set sender_id = 'a3291c54-3ee6-4d61-8aea-62d3ff5c5657'::uuid
+set sender_id = s.admin_id
+from (
+  select p.id as admin_id
+  from public.profiles p
+  where lower(trim(p.role::text)) = 'admin'
+    and (p.is_blocked is null or p.is_blocked = false)
+  order by p.created_at asc nulls last, p.id asc
+  limit 1
+) s
 where m.sender_id is null
    or not exists (
      select 1
@@ -51,4 +57,3 @@ where m.sender_id is null
    or p.id is null;
 
 commit;
-

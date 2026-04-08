@@ -6,7 +6,7 @@ import '../../../core/theme/app_design_system.dart';
 import '../../../core/theme/naham_theme.dart';
 import '../data/chef_reg_draft_storage.dart';
 
-/// Submission success: enter limited chef shell until admin approves documents.
+/// Submission success: after sign-in, onboarding gate ([CookPendingScreen]) until both documents are approved.
 class ChefRegSuccessScreen extends StatefulWidget {
   const ChefRegSuccessScreen({super.key});
 
@@ -49,7 +49,7 @@ class _ChefRegSuccessScreenState extends State<ChefRegSuccessScreen> {
               ),
               const SizedBox(height: AppDesignSystem.space16),
               Text(
-                'You can open the chef app now. Home, Orders, Menu and Reels stay locked until an admin approves your documents. Use Chat (Support) and Profile → Documents in the meantime—we may message you there.',
+                'Sign in when you are ready. The cook app opens fully only after an admin approves both verification documents. Until then you can manage uploads from the onboarding screen.',
                 style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                       color: AppDesignSystem.textSecondary,
                     ),
@@ -59,7 +59,7 @@ class _ChefRegSuccessScreenState extends State<ChefRegSuccessScreen> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
-                  onPressed: () => context.go(RouteNames.chefHome),
+                  onPressed: () => context.go(RouteNames.cookPending),
                   style: FilledButton.styleFrom(
                     minimumSize: const Size(double.infinity, 56),
                     backgroundColor: NahamTheme.primary,

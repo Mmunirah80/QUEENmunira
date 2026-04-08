@@ -1,9 +1,11 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../core/constants/route_names.dart';
 import '../../../core/theme/app_design_system.dart';
-import '../../../core/utils/extensions.dart';
+import '../../../core/validation/naham_validators.dart';
 import '../../../core/widgets/snackbar_helper.dart';
 import '../domain/entities/user_entity.dart';
 import '../presentation/providers/auth_provider.dart';
@@ -53,9 +55,9 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
           );
 
       if (mounted) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
-        );
+        ref.read(selectedRoleProvider.notifier).state = AppRole.customer;
+        debugPrint('[ROUTER] customer signup ok -> splash');
+        context.go(RouteNames.splash);
       }
     } catch (e) {
       debugPrint('[Signup] Error: $e');
@@ -99,7 +101,7 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                 Text(
                   'Sign up to order from cooks',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: context.colorScheme.onSurface.withOpacity(0.6),
+                        color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
                       ),
                   textAlign: TextAlign.center,
                 ),
@@ -107,17 +109,13 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                 // Name field
                 TextFormField(
                   controller: _nameController,
+                  textCapitalization: TextCapitalization.words,
                   decoration: const InputDecoration(
                     labelText: 'Full Name',
                     hintText: 'Enter your full name',
                     prefixIcon: Icon(Icons.person_outlined),
                   ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter your name';
-                    }
-                    return null;
-                  },
+                  validator: NahamValidators.personOrDishName,
                 ),
                 const SizedBox(height: AppDesignSystem.space20),
                 // Email field
@@ -129,26 +127,26 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                     hintText: 'Enter your email',
                     prefixIcon: Icon(Icons.email_outlined),
                   ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter your email';
-                    }
-                    if (!value.isValidEmail) {
-                      return 'Please enter a valid email';
-                    }
-                    return null;
-                  },
+                  validator: (v) => NahamValidators.email(
+                    v,
+                    emptyMessage: 'Please enter your email',
+                    invalidMessage: 'Please enter a valid email',
+                  ),
                 ),
                 const SizedBox(height: AppDesignSystem.space20),
                 // Phone field (optional)
                 TextFormField(
                   controller: _phoneController,
                   keyboardType: TextInputType.phone,
+                  inputFormatters: <TextInputFormatter>[
+                    FilteringTextInputFormatter.allow(RegExp(r'[\d+\s\-()]')),
+                  ],
                   decoration: const InputDecoration(
                     labelText: 'Phone (Optional)',
                     hintText: 'Enter your phone number',
                     prefixIcon: Icon(Icons.phone_outlined),
                   ),
+                  validator: (v) => NahamValidators.phoneDigits(v),
                 ),
                 const SizedBox(height: AppDesignSystem.space20),
                 // Password field

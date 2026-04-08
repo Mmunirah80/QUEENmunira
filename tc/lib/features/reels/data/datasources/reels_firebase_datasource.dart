@@ -12,6 +12,9 @@ import 'reels_remote_datasource.dart';
 class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
   SupabaseClient get _sb => SupabaseConfig.client;
 
+  /// Cap avoids loading unbounded rows on large installs (tune if you add cursor pagination).
+  static const int _kReelsListMax = 500;
+
   String get _currentUserId => _sb.auth.currentUser?.id ?? '';
 
   DateTime _parseDate(dynamic value) {
@@ -40,7 +43,7 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
     if (await _isCurrentUserAdmin()) return;
     final row = await _sb
         .from('chef_profiles')
-        .select('approval_status, suspended')
+        .select('approval_status, access_level, documents_operational_ok, suspended')
         .eq('id', uid)
         .maybeSingle();
     if (row == null) {
@@ -49,7 +52,10 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
     if (row['suspended'] == true) {
       throw Exception('Your kitchen is suspended. You cannot post reels.');
     }
-    if ((row['approval_status']?.toString() ?? '') != 'approved') {
+    final al = (row['access_level'] ?? '').toString().toLowerCase();
+    final op = row['documents_operational_ok'] == true;
+    final legacyOk = (row['approval_status']?.toString() ?? '') == 'approved';
+    if (!(al == 'full_access' && op) && !legacyOk) {
       throw Exception(
         'Your account must be approved before you can post reels. Complete verification in Profile → Documents.',
       );
@@ -107,9 +113,11 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
     final kitchenNames = await _fetchKitchenNames(chefIds);
     final dishNames = await _fetchDishNames(dishIds);
 
+    final hasLikesCountColumn = rows.isNotEmpty &&
+        (rows.first as Map<String, dynamic>).containsKey('likes_count');
+
     final likesByReel = <String, int>{};
-    final likedByMe = <String>{};
-    if (reelIds.isNotEmpty) {
+    if (!hasLikesCountColumn && reelIds.isNotEmpty) {
       final likesRows = await _sb
           .from('reel_likes')
           .select('reel_id,customer_id')
@@ -117,12 +125,22 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
       for (final raw in (likesRows as List)) {
         final row = raw as Map<String, dynamic>;
         final reelId = (row['reel_id'] ?? '').toString();
-        final liker = (row['customer_id'] ?? '').toString();
         if (reelId.isEmpty) continue;
         likesByReel[reelId] = (likesByReel[reelId] ?? 0) + 1;
-        if (currentUserId.isNotEmpty && liker == currentUserId) {
-          likedByMe.add(reelId);
-        }
+      }
+    }
+
+    final likedByMe = <String>{};
+    if (reelIds.isNotEmpty && currentUserId.isNotEmpty) {
+      final mine = await _sb
+          .from('reel_likes')
+          .select('reel_id')
+          .eq('customer_id', currentUserId)
+          .inFilter('reel_id', reelIds);
+      for (final raw in (mine as List)) {
+        final row = raw as Map<String, dynamic>;
+        final rid = (row['reel_id'] ?? '').toString();
+        if (rid.isNotEmpty) likedByMe.add(rid);
       }
     }
 
@@ -132,6 +150,8 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
       final chefId = (row['chef_id'] ?? '').toString();
       final dishId = row['dish_id']?.toString();
       final chefName = kitchenNames[chefId] ?? ((row['chef_name'] ?? row['chefName']) ?? 'Cook').toString();
+      final fromCol = (row['likes_count'] as num?)?.toInt();
+      final likesCount = fromCol ?? likesByReel[id] ?? 0;
       return ReelModel(
         id: id,
         chefId: chefId,
@@ -143,7 +163,7 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
         dishId: dishId != null && dishId.isNotEmpty ? dishId : null,
         dishName: dishId != null && dishId.isNotEmpty ? dishNames[dishId] : null,
         tags: _parseTags(row['tags']),
-        likesCount: likesByReel[id] ?? 0,
+        likesCount: likesCount,
         likedBy: const [],
         commentsCount: 0,
         createdAt: _parseDate(row['created_at']),
@@ -159,7 +179,8 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
     final rows = await _sb
         .from('reels')
         .select()
-        .order('created_at', ascending: false);
+        .order('created_at', ascending: false)
+        .limit(_kReelsListMax);
     return _mapRows((rows as List?) ?? const [], currentUserId: userId);
   }
 
@@ -226,6 +247,7 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
           'video_url': videoUrl,
           'caption': caption ?? '',
           'created_at': DateTime.now().toUtc().toIso8601String(),
+          'is_active': true,
         })
         .select()
         .single();
@@ -351,6 +373,7 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
       'video_url': videoUrl,
       'caption': description,
       'created_at': DateTime.now().toUtc().toIso8601String(),
+      'is_active': true,
     };
     if (tags.isNotEmpty) insertPayload['tags'] = tags;
     if (linkedDishId != null) insertPayload['dish_id'] = linkedDishId;
@@ -386,11 +409,14 @@ class ReelsFirebaseDataSource implements ReelsRemoteDataSource {
   Future<void> likeReel(String reelId) async {
     final userId = _currentUserId;
     if (userId.isEmpty || reelId.isEmpty) return;
-    await _sb.from('reel_likes').upsert({
-      'reel_id': reelId,
-      'customer_id': userId,
-      'created_at': DateTime.now().toUtc().toIso8601String(),
-    });
+    await _sb.from('reel_likes').upsert(
+      {
+        'reel_id': reelId,
+        'customer_id': userId,
+        'created_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      onConflict: 'reel_id,customer_id',
+    );
   }
 
   @override
