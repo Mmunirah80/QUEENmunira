@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../../../core/debug/debug_auth_bypass.dart';
+import '../../../../core/supabase/supabase_auth_user_id.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../../orders/data/datasources/orders_datasource_exceptions.dart';
 import '../../../orders/data/order_db_status.dart';
@@ -401,7 +401,7 @@ class CustomerOrdersSupabaseDatasource {
   /// Rolls back a **pending** order after a failed payment / checkout attempt (all-or-nothing checkout).
   /// This is not a discretionary customer cancel — it uses the same system reason as automated timeouts.
   Future<void> cancelPendingOrderAfterPaymentFailure(String orderId) async {
-    final uid = effectiveSupabaseAuthUserId(_sb);
+    final uid = supabaseAuthUserId(_sb);
     if (uid == null || uid.isEmpty) {
       throw Exception('Not signed in');
     }

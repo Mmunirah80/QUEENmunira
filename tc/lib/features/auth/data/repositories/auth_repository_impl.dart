@@ -3,8 +3,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../domain/entities/user_entity.dart';
 import '../../domain/repositories/auth_repository.dart';
-import '../../../../core/debug/debug_auth_bypass.dart';
-import '../datasources/auth_bypass_datasource.dart';
 import '../datasources/auth_remote_datasource.dart';
 import '../datasources/auth_supabase_datasource.dart';
 
@@ -13,8 +11,7 @@ class AuthRepositoryImpl implements AuthRepository {
 
   AuthRepositoryImpl({
     AuthRemoteDataSource? remoteDataSource,
-  }) : remoteDataSource = remoteDataSource ??
-            (authBypassIsOn ? AuthBypassDatasource() : AuthSupabaseDatasource());
+  }) : remoteDataSource = remoteDataSource ?? AuthSupabaseDatasource();
 
   @override
   Future<UserEntity> login(String email, String password, [AppRole? role]) async {
@@ -85,9 +82,6 @@ class AuthRepositoryImpl implements AuthRepository {
 
   @override
   Stream<void> watchAuthState() {
-    if (remoteDataSource is AuthBypassDatasource) {
-      return const Stream<void>.empty();
-    }
     if (remoteDataSource is AuthSupabaseDatasource) {
       return (remoteDataSource as AuthSupabaseDatasource)
           .watchAuthState()
@@ -98,9 +92,6 @@ class AuthRepositoryImpl implements AuthRepository {
 
   @override
   Future<void> resetPassword(String email) async {
-    if (remoteDataSource is AuthBypassDatasource) {
-      return;
-    }
     try {
       if (remoteDataSource is AuthSupabaseDatasource) {
         await (remoteDataSource as AuthSupabaseDatasource).resetPassword(email);

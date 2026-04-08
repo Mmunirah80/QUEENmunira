@@ -15,8 +15,8 @@ void main() {
       expect(formatPickupDistanceKm(0.6), '0.6 km');
     });
 
-    test('formatPickupDistanceKm caps at 20 km', () {
-      expect(formatPickupDistanceKm(25), '20.0 km');
+    test('formatPickupDistanceKm does not cap long distances (same-city browse)', () {
+      expect(formatPickupDistanceKm(25), '25.0 km');
     });
 
     test('formatPickupDistanceKm mid range', () {
@@ -46,7 +46,7 @@ void main() {
       final sorted = buildPickupSortedChefs(chefs, customerLat, customerLng);
       expect(sorted, isNotEmpty);
       expect(sorted.first.distanceKm, isNotNull);
-      expect(sorted.first.distanceKm!, lessThanOrEqualTo(kMaxPickupRadiusKm));
+      expect(sorted.first.distanceKm!, lessThanOrEqualTo(kFallbackBrowseRadiusWhenCityUnknownKm));
     });
 
     test('buildPickupSortedChefs orders nearest coordinate kitchens first', () {
@@ -90,23 +90,63 @@ void main() {
       expect(list.isNotEmpty, chefVisibleForCustomerHome(chef, customerLat, customerLng, 'Riyadh'));
     });
 
+    test('kitchenCityTextIndicatesRiyadh matches substring rules', () {
+      expect(kitchenCityTextIndicatesRiyadh('الرياض'), true);
+      expect(kitchenCityTextIndicatesRiyadh('North Riyadh'), true);
+      expect(kitchenCityTextIndicatesRiyadh('RIYADH'), true);
+      expect(kitchenCityTextIndicatesRiyadh('جدة'), false);
+      expect(kitchenCityTextIndicatesRiyadh('رياض'), false);
+      expect(kitchenCityTextIndicatesRiyadh(null), false);
+    });
+
     test('chefReelGeographyMatches matches chefVisibleForCustomerHome when storefront accepts orders', () {
-      const customerLat = 24.7136;
-      const customerLng = 46.6753;
+      const riyadhLat = 24.7136;
+      const riyadhLng = 46.6753;
+      const jeddahLat = 21.5;
+      const jeddahLng = 39.2;
       final chef = ChefDocModel(
         chefId: 'c1',
         isOnline: true,
         kitchenName: 'Test',
         kitchenCity: 'Jeddah',
-        kitchenLatitude: 21.5,
-        kitchenLongitude: 39.2,
+        kitchenLatitude: jeddahLat,
+        kitchenLongitude: jeddahLng,
       );
-      for (final locality in <String?>[null, 'Riyadh', 'Jeddah']) {
+      // Riyadh-area pin: Home may normalize locality to Riyadh; Reels use the raw locality string — compare only when both use the same geographic intent.
+      for (final locality in <String?>[null, 'Riyadh']) {
         expect(
-          chefReelGeographyMatches(chef, customerLat, customerLng, locality),
-          chefVisibleForCustomerHome(chef, customerLat, customerLng, locality),
+          chefReelGeographyMatches(chef, riyadhLat, riyadhLng, locality),
+          chefVisibleForCustomerHome(chef, riyadhLat, riyadhLng, locality),
         );
       }
+      expect(
+        chefReelGeographyMatches(chef, jeddahLat, jeddahLng, 'Jeddah'),
+        chefVisibleForCustomerHome(chef, jeddahLat, jeddahLng, 'Jeddah'),
+      );
+    });
+
+    test('same-city browse includes kitchens beyond 20 km (sorted by distance)', () {
+      const customerLat = 24.7136;
+      const customerLng = 46.6753;
+      // ~35 km straight-line north-east inside Riyadh admin area (rough)
+      const farLat = 24.95;
+      const farLng = 46.95;
+      final farKm = haversineKm(customerLat, customerLng, farLat, farLng);
+      expect(farKm, greaterThan(20.0));
+      final chefs = [
+        ChefDocModel(
+          chefId: 'farChef',
+          isOnline: true,
+          kitchenName: 'Far Riyadh Kitchen',
+          kitchenCity: 'الرياض',
+          kitchenLatitude: farLat,
+          kitchenLongitude: farLng,
+        ),
+      ];
+      final sorted = buildHomeSortedChefs(chefs, customerLat, customerLng, 'Riyadh');
+      expect(sorted, isNotEmpty);
+      expect(sorted.first.chef.chefId, 'farChef');
+      expect(sorted.first.distanceKm, closeTo(farKm, 0.5));
     });
 
     test('chefReelGeographyMatches can include offline chef in same city when Home excludes them', () {

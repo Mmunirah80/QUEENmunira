@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:naham_cook_app/core/location/pickup_distance.dart';
 import 'package:naham_cook_app/core/utils/supabase_error_message.dart';
 import 'package:naham_cook_app/core/widgets/snackbar_helper.dart';
 import 'package:naham_cook_app/features/customer/presentation/providers/customer_providers.dart';
@@ -216,7 +217,7 @@ class _CustomerReelsFeedState extends ConsumerState<CustomerReelsFeed> {
                   Text(
                     hasLocality
                         ? 'From kitchens in $locality · same scope as Home'
-                        : 'Same kitchens as Home · within pickup distance',
+                        : 'Same kitchens as Home · up to ${kFallbackBrowseRadiusWhenCityUnknownKm.toStringAsFixed(0)} km if city unknown',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 12.5,

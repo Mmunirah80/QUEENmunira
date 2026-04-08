@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 import '../../features/auth/domain/entities/user_entity.dart';
 import '../../features/cook/data/models/chef_doc_model.dart';
 import '../constants/route_names.dart';
-import '../debug/debug_auth_bypass.dart';
 
 /// Cook has not completed two-document approval — only [cookPending], verification docs, and notifications.
 bool isChefOnboardingGatePath(String path) {
@@ -38,9 +37,6 @@ String? redirectForExpiredSession({
   required String path,
   required bool sessionIsExpired,
 }) {
-  if (authBypassIsOn) {
-    return null;
-  }
   if (sessionIsExpired && path != RouteNames.login && path != RouteNames.splash) {
     return RouteNames.login;
   }

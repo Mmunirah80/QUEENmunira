@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../../../core/debug/debug_auth_bypass.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../../auth/presentation/providers/auth_provider.dart';
 import '../../data/datasources/admin_supabase_datasource.dart';
@@ -19,11 +18,8 @@ final isAdminProvider = Provider<bool>((ref) {
   return user?.isAdmin == true && user?.isBlocked != true;
 });
 
-/// Session user id for admin chat (labels + send). Uses app auth state when debug bypass is on.
+/// Session user id for admin chat (labels + send).
 final adminChatSessionUserIdProvider = Provider<String>((ref) {
-  if (authBypassIsOn) {
-    return ref.watch(authStateProvider).valueOrNull?.id.trim() ?? '';
-  }
   return Supabase.instance.client.auth.currentUser?.id.trim() ?? '';
 });
 

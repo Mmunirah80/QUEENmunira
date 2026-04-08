@@ -147,9 +147,8 @@ void main() {
       );
     });
 
-    test('wrong city vs pickup → hidden when kitchen pin is far (outside radius)', () {
-      // City scope excludes Jeddah when pickup is Riyadh; fallback uses distance.
-      // Same label with Riyadh-area coords would still match by distance — use Jeddah coords.
+    test('wrong city vs pickup → hidden when kitchen is another city', () {
+      // Same-city filter excludes Jeddah when pickup locality is Riyadh (no cross-city listing).
       expect(
         customerCanSeeReelInFeed(
           chef: approvedChefWithPin(

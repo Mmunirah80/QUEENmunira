@@ -23,10 +23,31 @@ import 'package:naham_cook_app/features/customer/screens/customer_cart_screen.da
 import 'package:naham_cook_app/features/customer/screens/chef_profile_screen.dart';
 import 'package:naham_cook_app/features/customer/naham_customer_screens.dart' show NahamCustomerNotificationsScreen;
 import 'package:latlong2/latlong.dart';
+import 'package:naham_cook_app/core/constants/demo_location.dart';
 import 'package:naham_cook_app/core/location/customer_location_service.dart';
 import 'package:naham_cook_app/core/location/pickup_distance.dart';
 import 'package:naham_cook_app/features/customer/screens/map_pin_picker_screen.dart';
 import 'package:naham_cook_app/features/customer/domain/customer_discovery_sorting.dart';
+
+/// Default pickup for browse when none saved — Riyadh demo center (orders still need a real pin).
+const CustomerPickupOrigin _kRiyadhDemoBrowseFallback = CustomerPickupOrigin(
+  latitude: kNahamDemoRiyadhLatitude,
+  longitude: kNahamDemoRiyadhLongitude,
+  label: 'Riyadh (demo browse)',
+  detailLabel: 'Browsing demo kitchens — set pickup to order',
+  localityCity: 'Riyadh',
+);
+
+/// Dishes grouped by cook for home browse (display only; never used to filter chefs).
+Map<String, List<DishEntity>> groupDishesByChefIdForCustomerHome(List<DishEntity> dishes) {
+  final m = <String, List<DishEntity>>{};
+  for (final d in dishes) {
+    final id = d.chefId;
+    if (id == null || id.isEmpty) continue;
+    m.putIfAbsent(id, () => <DishEntity>[]).add(d);
+  }
+  return m;
+}
 
 class _C {
   static const primary = AppDesignSystem.primary;
@@ -120,6 +141,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
     final notifications = ref.watch(customerNotificationsStreamProvider).valueOrNull ?? [];
     final unreadCount = notifications.where((n) => (n['is_read'] as bool? ?? false) == false).length;
     final pickupOrigin = ref.watch(customerPickupOriginProvider);
+    final browseOrigin = pickupOrigin ?? _kRiyadhDemoBrowseFallback;
 
     return Scaffold(
       backgroundColor: _C.bg,
@@ -127,66 +149,18 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
         children: [
           _buildHeader(context, cartCount, unreadCount, pickupOrigin),
           _buildLocationHeader(context, pickupOrigin),
-          if (pickupOrigin == null)
-            Expanded(
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 90,
-                        height: 90,
-                        decoration: BoxDecoration(
-                          color: _C.primary.withValues(alpha: 0.08),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(Icons.location_on_rounded, color: _C.primary, size: 40),
-                      ),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'Choose your location',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Pickup only — we sort cooks by distance (up to ${kMaxPickupRadiusKm.toStringAsFixed(0)} km).',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 14, color: _C.textSub),
-                      ),
-                      const SizedBox(height: 20),
-                      FilledButton(
-                        onPressed: () => _showLocationBottomSheet(context),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: _C.primary,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                        ),
-                        child: const Text('Set pickup point'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            )
-          else
-            Expanded(
-              child: Consumer(
-                builder: (context, ref, _) {
-                  final dishesAsync = ref.watch(availableDishesStreamProvider);
-                  final chefsAsync = ref.watch(chefsForCustomerStreamProvider);
-                  final origin = ref.watch(customerPickupOriginProvider);
-                  if (origin == null) return const SizedBox.shrink();
-                  return dishesAsync.when(
-              data: (dishes) {
+          Expanded(
+            child: Consumer(
+              builder: (context, ref, _) {
+                final dishesAsync = ref.watch(availableDishesStreamProvider);
+                final chefsAsync = ref.watch(chefsForCustomerStreamProvider);
                 return chefsAsync.when(
                   data: (chefs) {
                     final sorted = buildHomeSortedChefs(
                       chefs,
-                      origin.latitude,
-                      origin.longitude,
-                      origin.localityCity,
+                      browseOrigin.latitude,
+                      browseOrigin.longitude,
+                      browseOrigin.localityCity,
                     );
                     return RefreshIndicator(
                       onRefresh: () async {
@@ -200,9 +174,9 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             _buildCategoryChips(),
-                            _buildLocationContextLine(origin),
-                            _buildDishesSection(context, dishes, sorted, origin.localityCity),
-                            _buildChefsSection(context, sorted, origin),
+                            _buildLocationContextLine(browseOrigin, isDemoFallback: pickupOrigin == null),
+                            _buildDishesSection(context, dishesAsync, sorted, browseOrigin.localityCity),
+                            _buildChefsSection(context, sorted, browseOrigin, dishesAsync),
                             const SizedBox(height: 100),
                           ],
                         ),
@@ -210,69 +184,59 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                     );
                   },
                   loading: () {
-                    return Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          GridView.count(
-                            crossAxisCount: 2,
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            crossAxisSpacing: 12,
-                            mainAxisSpacing: 12,
-                            childAspectRatio: 0.62,
-                            children: const [
-                              SkeletonBox(height: 170, borderRadius: 16),
-                              SkeletonBox(height: 170, borderRadius: 16),
-                              SkeletonBox(height: 170, borderRadius: 16),
-                              SkeletonBox(height: 170, borderRadius: 16),
-                            ],
-                          ),
-                          const SizedBox(height: 24),
-                          SizedBox(
-                            height: 120,
-                            child: ListView.separated(
-                              scrollDirection: Axis.horizontal,
-                              itemCount: 3,
-                              separatorBuilder: (_, __) => const SizedBox(width: 12),
-                              itemBuilder: (_, __) => const SkeletonBox(width: 160, height: 120, borderRadius: 16),
+                    return SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            GridView.count(
+                              crossAxisCount: 2,
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              crossAxisSpacing: 12,
+                              mainAxisSpacing: 12,
+                              childAspectRatio: 0.62,
+                              children: const [
+                                SkeletonBox(height: 170, borderRadius: 16),
+                                SkeletonBox(height: 170, borderRadius: 16),
+                                SkeletonBox(height: 170, borderRadius: 16),
+                                SkeletonBox(height: 170, borderRadius: 16),
+                              ],
                             ),
-                          ),
-                        ],
+                            const SizedBox(height: 24),
+                            SizedBox(
+                              height: 120,
+                              child: ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: 3,
+                                separatorBuilder: (_, __) => const SizedBox(width: 12),
+                                itemBuilder: (_, __) => const SkeletonBox(width: 160, height: 120, borderRadius: 16),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     );
                   },
-                  error: (e, _) => Center(child: Text('Error: ${userFriendlyErrorMessage(e)}', style: const TextStyle(color: AppDesignSystem.errorRed))),
+                  error: (e, _) => Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text('Error: ${userFriendlyErrorMessage(e)}', style: const TextStyle(color: AppDesignSystem.errorRed)),
+                        const SizedBox(height: 16),
+                        TextButton(
+                          onPressed: () => ref.invalidate(chefsForCustomerStreamProvider),
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
                 );
               },
-              loading: () => Padding(
-                padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
-                child: Column(
-                  children: const [
-                    SkeletonBox(height: 180, borderRadius: 16),
-                    SizedBox(height: 12),
-                    SkeletonBox(height: 180, borderRadius: 16),
-                  ],
-                ),
-              ),
-              error: (e, _) => Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text('Error: ${userFriendlyErrorMessage(e)}', style: const TextStyle(color: AppDesignSystem.errorRed)),
-                    const SizedBox(height: 16),
-                    TextButton(
-                      onPressed: () => ref.invalidate(availableDishesStreamProvider),
-                      child: const Text('Retry'),
-                    ),
-                  ],
-                ),
-              ),
-            );
-                },
-              ),
             ),
+          ),
         ],
       ),
     );
@@ -507,7 +471,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
               const Text('Pickup point', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: _C.text)),
               const SizedBox(height: 8),
               Text(
-                'Where you will collect your order. We show cooks within ${kMaxPickupRadiusKm.toStringAsFixed(0)} km.',
+                'Where you will collect your order. Home lists kitchens in the same city as your pin (sorted by distance). If we cannot read a city, we use up to ${kFallbackBrowseRadiusWhenCityUnknownKm.toStringAsFixed(0)} km.',
                 style: TextStyle(fontSize: 13, color: _C.textSub),
               ),
               const SizedBox(height: 20),
@@ -561,12 +525,14 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
   }
 
   /// One line under cuisine chips: clarifies that location comes from the pickup pin / GPS, not profile.
-  Widget _buildLocationContextLine(CustomerPickupOrigin origin) {
+  Widget _buildLocationContextLine(CustomerPickupOrigin origin, {bool isDemoFallback = false}) {
     final raw = origin.localityCity?.trim();
     final hasCity = raw != null && raw.isNotEmpty;
-    final line = hasCity
-        ? 'Showing nearby chefs and dishes in $raw'
-        : 'Using your pickup location — we could not detect a city name; showing cooks within ${kMaxPickupRadiusKm.toStringAsFixed(0)} km.';
+    final line = isDemoFallback
+        ? 'Demo: showing Riyadh kitchens — tap location bar to set your real pickup for orders.'
+        : hasCity
+            ? 'Showing chefs and dishes in $raw (same city, nearest first)'
+            : 'Using your pickup location — no city detected; showing kitchens within ${kFallbackBrowseRadiusWhenCityUnknownKm.toStringAsFixed(0)} km.';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       child: Text(
@@ -628,10 +594,75 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
 
   Widget _buildDishesSection(
     BuildContext context,
-    List<DishEntity> dishes,
+    AsyncValue<List<DishEntity>> dishesAsync,
     List<ChefWithPickupDistance> sortedChefs,
     String? pickupLocalityCity,
   ) {
+    final dishes = dishesAsync.valueOrNull ?? const <DishEntity>[];
+    final dishesLoading = dishesAsync.isLoading;
+    final dishesError = dishesAsync.hasError ? dishesAsync.error : null;
+
+    if (dishesLoading && dishes.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Popular dishes',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text),
+            ),
+            const SizedBox(height: 12),
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: CircularProgressIndicator(strokeWidth: 2.5, color: _C.primary),
+                    ),
+                    SizedBox(height: 12),
+                    Text(
+                      'Loading dishes…',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _C.textSub),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (dishesError != null && dishes.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Popular dishes',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _C.text),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Could not load dishes: ${userFriendlyErrorMessage(dishesError)}',
+              style: const TextStyle(fontSize: 13, color: AppDesignSystem.errorRed, height: 1.35),
+            ),
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: () => ref.invalidate(availableDishesStreamProvider),
+              child: const Text('Retry dishes'),
+            ),
+          ],
+        ),
+      );
+    }
+
     if (dishes.isEmpty) {
       return Padding(
         padding: const EdgeInsets.all(24),
@@ -870,11 +901,75 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
     );
   }
 
+  /// Per-kitchen menu line: uses dishes stream for display only (never filters which chefs appear).
+  Widget _buildKitchenMenuPreview({
+    required String chefId,
+    required Map<String, List<DishEntity>> dishesByChef,
+    required bool dishesLoading,
+    required bool dishesHasError,
+  }) {
+    if (chefId.isEmpty) return const SizedBox.shrink();
+    if (dishesHasError) {
+      return Text(
+        'Menu unavailable',
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: _C.textSub, height: 1.25),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+      );
+    }
+    final list = dishesByChef[chefId];
+    if (dishesLoading && (list == null || list.isEmpty)) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(strokeWidth: 1.5, color: _C.primary.withValues(alpha: 0.85)),
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              'Loading menu…',
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: _C.textSub, height: 1.2),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      );
+    }
+    if (list == null || list.isEmpty) {
+      return Text(
+        'No dishes listed yet',
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: _C.textSub, height: 1.25),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+      );
+    }
+    final preview = list.take(3).map((d) => d.name).join(' · ');
+    return Text(
+      preview,
+      style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w600, color: _C.textSub, height: 1.25),
+      maxLines: 3,
+      overflow: TextOverflow.ellipsis,
+      textAlign: TextAlign.center,
+    );
+  }
+
   Widget _buildChefsSection(
     BuildContext context,
     List<ChefWithPickupDistance> sortedChefs,
     CustomerPickupOrigin pickupOrigin,
+    AsyncValue<List<DishEntity>> dishesAsync,
   ) {
+    final dishes = dishesAsync.valueOrNull ?? const <DishEntity>[];
+    final dishesByChef = groupDishesByChefIdForCustomerHome(dishes);
+    final dishesLoading = dishesAsync.isLoading;
+    final dishesHasError = dishesAsync.hasError;
+
     if (sortedChefs.isEmpty) {
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -896,8 +991,8 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
             const SizedBox(height: 8),
             Text(
               normalizeSaudiCityKey(pickupOrigin.localityCity).isNotEmpty
-                  ? 'No accepting kitchens match your area yet. Try another pickup point or check back later.'
-                  : 'No accepting kitchens within ${kMaxPickupRadiusKm.toStringAsFixed(0)} km (or we need a clearer city from your pin). Try another location.',
+                  ? 'No accepting kitchens match your city yet. Try another pickup point or check back later.'
+                  : 'No accepting kitchens within ${kFallbackBrowseRadiusWhenCityUnknownKm.toStringAsFixed(0)} km (or we need a clearer city from your pin). Try another location.',
               style: TextStyle(fontSize: 13, color: _C.textSub, height: 1.4, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 16),
@@ -926,7 +1021,7 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
           ),
           const SizedBox(height: 12),
           SizedBox(
-            height: 158,
+            height: 212,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: sortedChefs.length,
@@ -938,17 +1033,33 @@ class _NahamCustomerHomeScreenState extends ConsumerState<NahamCustomerHomeScree
                 final line = chefDistanceOrAreaLabel(entry, pickupOrigin.localityCity);
                 final rating = chef.ratingAvg;
                 final hasKm = entry.distanceKm != null;
-                return ChefCard(
-                  kitchenName: chef.kitchenName ?? 'Kitchen',
-                  distanceOrAreaLine: line,
-                  isStraightLineDistance: hasKm,
-                  rating: rating,
-                  onTap: chefId.isEmpty
-                      ? () {}
-                      : () => Navigator.push(
-                            context,
-                            _fadeRoute(ChefProfileScreen(chefId: chefId)),
-                          ),
+                return SizedBox(
+                  width: 176,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      ChefCard(
+                        kitchenName: chef.kitchenName ?? 'Kitchen',
+                        distanceOrAreaLine: line,
+                        isStraightLineDistance: hasKm,
+                        rating: rating,
+                        onTap: chefId.isEmpty
+                            ? () {}
+                            : () => Navigator.push(
+                                  context,
+                                  _fadeRoute(ChefProfileScreen(chefId: chefId)),
+                                ),
+                      ),
+                      const SizedBox(height: 6),
+                      _buildKitchenMenuPreview(
+                        chefId: chefId,
+                        dishesByChef: dishesByChef,
+                        dishesLoading: dishesLoading,
+                        dishesHasError: dishesHasError,
+                      ),
+                    ],
+                  ),
                 );
               },
             ),

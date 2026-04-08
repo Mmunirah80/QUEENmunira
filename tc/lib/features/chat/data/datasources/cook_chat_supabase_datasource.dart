@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../../../core/debug/debug_auth_bypass.dart';
+import '../../../../core/supabase/supabase_auth_user_id.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../chat_limits.dart';
 import '../models/chat_model.dart';
@@ -24,9 +24,8 @@ class CookChatSupabaseDataSource implements ChatRemoteDataSource {
     required this.chefId,
   }) : _client = client ?? SupabaseConfig.dataClient;
 
-  /// Session / debug-bypass user id for this cook (matches [messages.sender_id]).
-  String get _selfId =>
-      (effectiveSupabaseAuthUserId(_client) ?? chefId).trim();
+  /// Authenticated user id for this cook (matches [messages.sender_id]).
+  String get _selfId => (supabaseAuthUserId(_client) ?? chefId).trim();
 
   DateTime? _parseDateTime(dynamic v) {
     if (v == null) return null;

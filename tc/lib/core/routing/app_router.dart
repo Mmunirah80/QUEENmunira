@@ -39,10 +39,9 @@ import '../../features/cook/presentation/widgets/inspection_call_listener.dart';
 import '../../features/customer/screens/customer_main_navigation_screen.dart';
 import '../../features/notifications/screens/notifications_screen.dart';
 import '../constants/route_names.dart';
-import '../debug/debug_auth_bypass.dart';
 import 'go_router_redirect_policy.dart';
 
-/// Root [Navigator] key for dialogs/overlays (e.g. debug auth UI above [MaterialApp.router]).
+/// Root [Navigator] key for dialogs/overlays.
 final GlobalKey<NavigatorState> appRootNavigatorKey = GlobalKey<NavigatorState>();
 
 /// Notifies [GoRouter] when [authStateProvider] changes so redirects re-run.
@@ -66,9 +65,7 @@ final routerProvider = Provider<GoRouter>((ref) {
   final refresh = ref.watch(goRouterRefreshProvider);
   return GoRouter(
     navigatorKey: appRootNavigatorKey,
-    initialLocation: authBypassIsOn
-        ? DebugAuthBypass.homeRouteFor(ref.read(debugAuthRoleProvider))
-        : RouteNames.splash,
+    initialLocation: RouteNames.splash,
     refreshListenable: refresh,
     redirect: (context, state) {
       final path = state.uri.path;
@@ -77,8 +74,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         data: (user) {
           if (path == RouteNames.splash) {
             final session = Supabase.instance.client.auth.currentSession;
-            final hasValid = authBypassIsOn ||
-                (session != null && !session.isExpired);
+            final hasValid = session != null && !session.isExpired;
             final doc = ref.read(chefDocStreamProvider).valueOrNull;
             final splashTarget = computeSplashTarget(
               hasValidSession: hasValid,
@@ -97,8 +93,7 @@ final routerProvider = Provider<GoRouter>((ref) {
             return frozen;
           }
           final session = Supabase.instance.client.auth.currentSession;
-          final expired =
-              !authBypassIsOn && session != null && session.isExpired;
+          final expired = session != null && session.isExpired;
           final authRedirect = computeAuthRedirect(
             user: user,
             path: path,

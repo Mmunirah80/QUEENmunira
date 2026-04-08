@@ -2,14 +2,12 @@ import 'dart:math' as math;
 
 import '../../features/cook/data/models/chef_doc_model.dart';
 
-/// Max straight-line distance for showing a cook on the customer home (pickup only).
-const double kMaxPickupRadiusKm = 20.0;
+/// When reverse-geocode did not yield a city, only kitchens within this straight-line
+/// distance (km) from the pickup pin are listed (pickup-only safety net).
+const double kFallbackBrowseRadiusWhenCityUnknownKm = 100.0;
 
 /// Min distance shown in UI (500 m) — avoids tiny "34 m" labels; still real Haversine underneath.
 const double kMinPickupDisplayKm = 0.5;
-
-/// Max label cap (matches [kMaxPickupRadiusKm]).
-const double kMaxPickupDisplayKm = kMaxPickupRadiusKm;
 
 double haversineKm(double lat1, double lon1, double lat2, double lon2) {
   const earthKm = 6371.0;
@@ -23,18 +21,16 @@ double haversineKm(double lat1, double lon1, double lat2, double lon2) {
 
 double _rad(double deg) => deg * math.pi / 180.0;
 
-/// Always kilometers, one decimal. Clamped to [kMinPickupDisplayKm]…[kMaxPickupDisplayKm].
+/// Kilometers, one decimal; floors at [kMinPickupDisplayKm] only (no upper cap — same-city kitchens can be >20 km away).
 String formatPickupDistanceKm(double km) {
   if (km.isNaN || km < 0) {
     return '${kMinPickupDisplayKm.toStringAsFixed(1)} km';
   }
-  final clamped = km < kMinPickupDisplayKm
-      ? kMinPickupDisplayKm
-      : (km > kMaxPickupDisplayKm ? kMaxPickupDisplayKm : km);
+  final clamped = km < kMinPickupDisplayKm ? kMinPickupDisplayKm : km;
   return '${clamped.toStringAsFixed(1)} km';
 }
 
-/// Same as [formatPickupDistanceKm] but does not cap at [kMaxPickupRadiusKm] (for "whole city" browse).
+/// Same as [formatPickupDistanceKm] (kept for call sites that want explicit "natural" naming).
 String formatDistanceKmNatural(double km) {
   if (km.isNaN || km < 0) {
     return '${kMinPickupDisplayKm.toStringAsFixed(1)} km';
@@ -58,13 +54,59 @@ String normalizeKitchenCityKey(String? s) => (s ?? '').trim().toLowerCase();
 String normalizeSaudiCityKey(String? s) {
   final t = normalizeKitchenCityKey(s);
   if (t.isEmpty) return '';
-  if (t.contains('riyadh')) return 'riyadh';
-  if (t.contains('jeddah') || t.contains('jiddah')) return 'jeddah';
-  if (t.contains('dammam')) return 'dammam';
-  if (t.contains('makkah') || t.contains('mecca')) return 'makkah';
-  if (t.contains('madinah') || t.contains('medina')) return 'madinah';
-  if (t.contains('khobar') || t.contains('al khobar')) return 'khobar';
+  // Arabic + English + common district strings (e.g. "شمال الرياض" → Riyadh).
+  if (t.contains('riyadh') || t.contains('الرياض')) return 'riyadh';
+  if (t.contains('jeddah') || t.contains('jiddah') || t.contains('جدة') || t.contains('جده')) {
+    return 'jeddah';
+  }
+  if (t.contains('dammam') || t.contains('الدمام')) return 'dammam';
+  if (t.contains('makkah') || t.contains('mecca') || t.contains('مكة')) return 'makkah';
+  if (t.contains('madinah') || t.contains('medina') || t.contains('المدينة')) return 'madinah';
+  if (t.contains('khobar') || t.contains('al khobar') || t.contains('الخبر') || t.contains('خبر')) {
+    return 'khobar';
+  }
+  if (t.contains('taif') || t.contains('الطائف')) return 'taif';
   return t;
+}
+
+/// Pickup pin is in greater Riyadh (covers district-only geocodes like "Al Olaya" that do not contain "Riyadh").
+bool pickupCoordinatesLikelyRiyadh(double lat, double lng) {
+  return lat >= 24.15 && lat <= 25.75 && lng >= 45.95 && lng <= 47.45;
+}
+
+/// Riyadh home browse: match [chef_profiles.kitchen_city] by substring (not only normalized equality).
+bool kitchenCityTextIndicatesRiyadh(String? kitchenCity) {
+  final s = (kitchenCity ?? '').trim();
+  if (s.isEmpty) return false;
+  if (s.toLowerCase().contains('riyadh')) return true;
+  return s.contains('الرياض');
+}
+
+/// Geography match for home lists when customer browse resolves to [customerCityKey] ([normalizeSaudiCityKey]).
+bool homeKitchenMatchesBrowseCity(String? kitchenCity, String customerCityKey) {
+  if (customerCityKey.isEmpty) return false;
+  if (customerCityKey == 'riyadh') {
+    return kitchenCityTextIndicatesRiyadh(kitchenCity);
+  }
+  final kc = normalizeSaudiCityKey(kitchenCity);
+  return kc.isNotEmpty && kc == customerCityKey;
+}
+
+/// Locality string used only for **home browse** matching against [chef_profiles.kitchen_city].
+/// When the pin is in the Riyadh metro, always treat as Riyadh so Arabic `kitchen_city` rows match.
+String? effectiveLocalityCityForHomeBrowse(
+  String? pickupLocalityCity,
+  double customerLat,
+  double customerLng,
+) {
+  if (normalizeSaudiCityKey(pickupLocalityCity) == 'riyadh') {
+    final raw = pickupLocalityCity?.trim();
+    return (raw != null && raw.isNotEmpty) ? raw : 'Riyadh';
+  }
+  if (pickupCoordinatesLikelyRiyadh(customerLat, customerLng)) {
+    return 'Riyadh';
+  }
+  return pickupLocalityCity;
 }
 
 /// Cooks in the same city as [userCity] ([chef_profiles.kitchen_city]), sorted by distance from pickup when coords exist.
@@ -80,8 +122,7 @@ List<ChefWithPickupDistance> buildCityScopeChefs(
   final noCoord = <ChefWithPickupDistance>[];
   for (final c in chefs) {
     if (!c.storefrontEvaluation.isAcceptingOrders) continue;
-    final kc = normalizeSaudiCityKey(c.kitchenCity);
-    if (kc.isEmpty || kc != target) continue;
+    if (!homeKitchenMatchesBrowseCity(c.kitchenCity, target)) continue;
     final lat = c.kitchenLatitude;
     final lng = c.kitchenLongitude;
     if (lat != null && lng != null) {
@@ -96,24 +137,30 @@ List<ChefWithPickupDistance> buildCityScopeChefs(
   return [...withDist, ...noCoord];
 }
 
-/// Home browse: prefer kitchens in the same city as the pickup pin (reverse-geocode), nearest first.
-/// If no city could be resolved or no chefs match that city, falls back to [kMaxPickupRadiusKm] radius sort.
+/// Home browse: kitchens in the same city as the pickup pin (reverse-geocode), **all distances**, nearest first.
+/// Riyadh metro pins use [effectiveLocalityCityForHomeBrowse] so district-only geocodes still match `الرياض` kitchens.
+/// If no city is resolved from the pin, falls back to [kFallbackBrowseRadiusWhenCityUnknownKm] radius.
 List<ChefWithPickupDistance> buildHomeSortedChefs(
   List<ChefDocModel> chefs,
   double customerLat,
   double customerLng,
   String? pickupLocalityCity,
 ) {
-  final cityKey = normalizeSaudiCityKey(pickupLocalityCity);
+  final locality = effectiveLocalityCityForHomeBrowse(
+    pickupLocalityCity,
+    customerLat,
+    customerLng,
+  );
+  final cityKey = normalizeSaudiCityKey(locality);
   if (cityKey.isNotEmpty) {
-    final byCity = buildCityScopeChefs(chefs, pickupLocalityCity, customerLat, customerLng);
+    final byCity = buildCityScopeChefs(chefs, locality, customerLat, customerLng);
     if (byCity.isNotEmpty) return byCity;
   }
   return buildPickupSortedChefs(
     chefs,
     customerLat,
     customerLng,
-    pickupLocalityCity: pickupLocalityCity,
+    pickupLocalityCity: locality,
   );
 }
 
@@ -178,7 +225,8 @@ List<ChefWithPickupDistance> buildCityScopeChefsForReels(
   return [...withDist, ...noCoord];
 }
 
-/// Pickup-radius + no-coord ordering for reels (no storefront / online filter).
+/// Same-city (no distance cap) or [kFallbackBrowseRadiusWhenCityUnknownKm] when city unknown.
+/// No storefront / online filter (reels only).
 List<ChefWithPickupDistance> buildPickupSortedChefsForReels(
   List<ChefDocModel> chefs,
   double customerLat,
@@ -189,13 +237,18 @@ List<ChefWithPickupDistance> buildPickupSortedChefsForReels(
   final within = <ChefWithPickupDistance>[];
   final noCoord = <ChefWithPickupDistance>[];
   for (final c in chefs) {
+    final kc = normalizeSaudiCityKey(c.kitchenCity);
+    if (cityKey.isNotEmpty && (kc.isEmpty || kc != cityKey)) {
+      continue;
+    }
     final lat = c.kitchenLatitude;
     final lng = c.kitchenLongitude;
     if (lat != null && lng != null) {
       final d = haversineKm(customerLat, customerLng, lat, lng);
-      if (d <= kMaxPickupRadiusKm) {
-        within.add(ChefWithPickupDistance(c, d));
+      if (cityKey.isEmpty && d > kFallbackBrowseRadiusWhenCityUnknownKm) {
+        continue;
       }
+      within.add(ChefWithPickupDistance(c, d));
     } else {
       noCoord.add(ChefWithPickupDistance(c, null));
     }
@@ -210,8 +263,8 @@ List<ChefWithPickupDistance> buildPickupSortedChefsForReels(
   final noCoordSameArea = <ChefWithPickupDistance>[];
   final noCoordOther = <ChefWithPickupDistance>[];
   for (final e in noCoord) {
-    final kc = normalizeSaudiCityKey(e.chef.kitchenCity);
-    if (kc.isEmpty || kc == cityKey) {
+    final nk = normalizeSaudiCityKey(e.chef.kitchenCity);
+    if (nk.isEmpty || nk == cityKey) {
       noCoordSameArea.add(e);
     } else {
       noCoordOther.add(e);
@@ -291,10 +344,10 @@ String chefNoDistanceLocationHint(ChefDocModel chef, String? pickupLocalityCity)
   return 'No map location';
 }
 
-/// Cooks accepting storefront orders: those with kitchen coordinates within [kMaxPickupRadiusKm],
-/// sorted by actual distance (nearest first). Cooks without coordinates are listed after, ordered by
-/// [pickupLocalityCity] match ([chef_profiles.kitchen_city]) then kitchen name — so city/area is the
-/// fallback when distance cannot be computed.
+/// When [pickupLocalityCity] normalizes to a city: **all** accepting kitchens in that city (by
+/// [chef_profiles.kitchen_city]), sorted by distance (nearest first) — no max distance within the city.
+/// When city is unknown: kitchens within [kFallbackBrowseRadiusWhenCityUnknownKm] only.
+/// Kitchens without coordinates are listed after coordinate kitchens (name order).
 List<ChefWithPickupDistance> buildPickupSortedChefs(
   List<ChefDocModel> chefs,
   double customerLat,
@@ -306,13 +359,17 @@ List<ChefWithPickupDistance> buildPickupSortedChefs(
   final noCoord = <ChefWithPickupDistance>[];
   for (final c in chefs) {
     if (!c.storefrontEvaluation.isAcceptingOrders) continue;
+    if (cityKey.isNotEmpty && !homeKitchenMatchesBrowseCity(c.kitchenCity, cityKey)) {
+      continue;
+    }
     final lat = c.kitchenLatitude;
     final lng = c.kitchenLongitude;
     if (lat != null && lng != null) {
       final d = haversineKm(customerLat, customerLng, lat, lng);
-      if (d <= kMaxPickupRadiusKm) {
-        within.add(ChefWithPickupDistance(c, d));
+      if (cityKey.isEmpty && d > kFallbackBrowseRadiusWhenCityUnknownKm) {
+        continue;
       }
+      within.add(ChefWithPickupDistance(c, d));
     } else {
       noCoord.add(ChefWithPickupDistance(c, null));
     }
@@ -327,8 +384,14 @@ List<ChefWithPickupDistance> buildPickupSortedChefs(
   final noCoordSameArea = <ChefWithPickupDistance>[];
   final noCoordOther = <ChefWithPickupDistance>[];
   for (final e in noCoord) {
-    final kc = normalizeSaudiCityKey(e.chef.kitchenCity);
-    if (kc.isEmpty || kc == cityKey) {
+    final nk = normalizeSaudiCityKey(e.chef.kitchenCity);
+    final bool sameArea;
+    if (cityKey == 'riyadh') {
+      sameArea = nk.isEmpty || kitchenCityTextIndicatesRiyadh(e.chef.kitchenCity);
+    } else {
+      sameArea = nk.isEmpty || nk == cityKey;
+    }
+    if (sameArea) {
       noCoordSameArea.add(e);
     } else {
       noCoordOther.add(e);

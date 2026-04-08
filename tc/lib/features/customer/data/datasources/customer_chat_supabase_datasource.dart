@@ -7,7 +7,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter/foundation.dart';
 
-import '../../../../core/debug/debug_auth_bypass.dart';
+import '../../../../core/supabase/supabase_auth_user_id.dart';
 import '../../../../core/supabase/supabase_config.dart';
 import '../../../chat/data/chat_limits.dart';
 
@@ -230,7 +230,7 @@ class CustomerChatSupabaseDatasource {
 
   /// Send a message. Accepts [conversationId] or [chatId].
   /// Also updates [conversations.last_message] when those columns exist and RLS allows (best-effort).
-  /// [senderId] is ignored for production; [sender_id] is the session user, or the debug bypass UUID.
+  /// [senderId] is ignored; [sender_id] is the signed-in session user.
   Future<void> sendMessage({
     String? conversationId,
     String? chatId,
@@ -241,7 +241,7 @@ class CustomerChatSupabaseDatasource {
     if (cid.isEmpty) throw ArgumentError('conversationId or chatId required');
     final trimmed = content.trim();
     if (trimmed.isEmpty) throw ArgumentError('Message content is empty');
-    final sid = (effectiveSupabaseAuthUserId(_sb) ?? '').trim();
+    final sid = (supabaseAuthUserId(_sb) ?? '').trim();
     if (sid.isEmpty) {
       throw ArgumentError('Must be signed in to send messages');
     }

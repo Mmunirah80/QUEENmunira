@@ -4,7 +4,6 @@ import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/constants/route_names.dart';
-import '../../../core/debug/debug_auth_bypass.dart';
 import '../../../core/theme/naham_theme.dart';
 import '../presentation/providers/auth_provider.dart';
 
@@ -24,13 +23,9 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    if (authBypassIsOn) {
-      _minSplashDone = true;
-    } else {
-      Future.delayed(const Duration(milliseconds: 1500), () {
-        if (mounted) setState(() => _minSplashDone = true);
-      });
-    }
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _minSplashDone = true);
+    });
   }
 
   @override
@@ -42,8 +37,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
     if (_minSplashDone && !auth.isLoading && !_navigated) {
       final user = auth.valueOrNull;
       final failed = auth.hasError;
-      final sessionInvalid =
-          !authBypassIsOn && (session == null || session.isExpired);
+      final sessionInvalid = session == null || session.isExpired;
       final unauthenticated = failed ||
           sessionInvalid ||
           user == null ||
